@@ -14,24 +14,27 @@ load_dotenv()
 # ==== Конфигурация из окружения ====
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN")
 CLICKUP_TEAM_ID = os.getenv("CLICKUP_TEAM_ID")
+CLICKUP_ONLY_OPEN = os.getenv("CLICKUP_ONLY_OPEN", "true").lower() == "true"
 LOOKBACK_HOURS = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
-INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")  # ИСПРАВЛЕНО: Unstable для internal articles
+INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID"))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 SYNC_STATE_FILE = os.getenv("SYNC_STATE_FILE", ".sync_state.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
-SPACE_ID = "90153590151"
+SPACE_ID = "90153590151"  # Hardcoded for "Croco KB"
 
-IGNORED_LIST_IDS = ["901509433569", "901509402998"]
+IGNORED_LIST_IDS = ["901509433569", "901509402998"]  # Forms и ChangeLog
 
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
+assert CLICKUP_TEAM_ID, "CLICKUP_TEAM_ID is required"
 assert INTERCOM_TOKEN, "INTERCOM_ACCESS_TOKEN is required"
 assert INTERCOM_OWNER_ID, "INTERCOM_OWNER_ID is required"
 assert INTERCOM_AUTHOR_ID, "INTERCOM_AUTHOR_ID is required"
+assert SPACE_ID, "SPACE_ID must be set"
 
 # ==== Логирование ====
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -39,9 +42,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 # ==== Сессии ====
 cu = requests.Session()
 cu.headers.update({
-    "Authorization": CLICKUP_TOKEN,  # УБРАНО Bearer - ClickUp не требует его
+    "Authorization": CLICKUP_TOKEN,  # Без Bearer для ClickUp
     "Content-Type": "application/json"
 })
+cu.timeout = 10
 
 ic = requests.Session()
 ic.headers.update({
@@ -50,6 +54,7 @@ ic.headers.update({
     "Intercom-Version": INTERCOM_VERSION,
     "Content-Type": "application/json"
 })
+ic.timeout = 10
 
 # ==== Утилиты ====
 def _load_state():
@@ -70,14 +75,44 @@ def _rate_limit_sleep(resp: requests.Response):
         return True
     return False
 
-# ==== ClickUp: Получение всех задач напрямую из пространства (ОПТИМИЗИРОВАНО) ====
-def fetch_clickup_tasks(space_id: str, updated_after: datetime):
-    """Получаем задачи напрямую из пространства - быстрее и проще"""
-    base = f"https://api.clickup.com/api/v2/space/{space_id}/task"
+# ==== ClickUp: Получение папок из пространства ====
+def fetch_folders(space_id: str):
+    base = f"https://api.clickup.com/api/v2/space/{space_id}/folder"
+    params = {"archived": "false"}
+    logging.info(f"Fetching folders from {base}")
+    r = cu.get(base, params=params)
+    while _rate_limit_sleep(r):
+        r = cu.get(base, params=params)
+    r.raise_for_status()
+    return r.json().get("folders", [])
+
+# ==== ClickUp: Получение списков из папки ====
+def fetch_lists_from_folder(folder_id: str):
+    base = f"https://api.clickup.com/api/v2/folder/{folder_id}/list"
+    params = {"archived": "false"}
+    logging.info(f"Fetching lists from folder {folder_id}")
+    r = cu.get(base, params=params)
+    while _rate_limit_sleep(r):
+        r = cu.get(base, params=params)
+    r.raise_for_status()
+    return r.json().get("lists", [])
+
+# ==== ClickUp: Получение списков без папки ====
+def fetch_folderless_lists(space_id: str):
+    base = f"https://api.clickup.com/api/v2/space/{space_id}/list"
+    params = {"archived": "false"}
+    logging.info(f"Fetching folderless lists from {base}")
+    r = cu.get(base, params=params)
+    while _rate_limit_sleep(r):
+        r = cu.get(base, params=params)
+    r.raise_for_status()
+    return r.json().get("lists", [])
+
+# ==== ClickUp: Получение задач из списка ====
+def fetch_tasks_from_list(list_id: str, updated_after: datetime):
+    base = f"https://api.clickup.com/api/v2/list/{list_id}/task"
     page = 0
-    total = 0
     updated_gt = int(updated_after.timestamp() * 1000) if not FETCH_ALL else None
-    
     while True:
         params = {
             "page": page,
@@ -87,77 +122,74 @@ def fetch_clickup_tasks(space_id: str, updated_after: datetime):
             "reverse": "true",
             "subtasks": "true",
             "limit": 100,
-            "custom_fields": "true",  # Для полного описания
-            "tags[]": [],  # Чтобы получить все теги
         }
         if updated_gt:
             params["updated_gt"] = updated_gt
-            
-        logging.info(f"Fetching tasks from space {space_id}, page {page}")
+        if CLICKUP_ONLY_OPEN:
+            params["statuses[]"] = ["to do", "in progress"]
+        logging.info(f"Fetching tasks from list {list_id}, page {page}")
         r = cu.get(base, params=params)
         while _rate_limit_sleep(r):
             r = cu.get(base, params=params)
         r.raise_for_status()
-        
-        data = r.json()
-        batch = data.get("tasks", [])
+        batch = r.json().get("tasks", [])
         if not batch:
             break
-            
-        for task in batch:
-            # Проверяем, не из ли игнорируемых листов
-            list_id = task.get("list", {}).get("id")
-            if list_id in IGNORED_LIST_IDS:
-                logging.info(f"Skipping ignored list task: {task.get('name')}")
-                continue
-                
-            total += 1
-            yield task  # Уже полная задача с description
-            
+        for t in batch:
+            yield t
         page += 1
-    
-    logging.info(f"Fetched {total} tasks from space {space_id}")
 
-# ==== УПРОЩЕННАЯ функция для HTML (ТОЛЬКО title + description) ====
+# ==== Главная функция для получения всех задач ====
+def fetch_clickup_tasks(updated_after: datetime, space_id: str):
+    folders = fetch_folders(space_id)
+    for folder in folders:
+        folder_id = folder.get("id")
+        lists = fetch_lists_from_folder(folder_id)
+        for lst in lists:
+            list_id = lst.get("id")
+            if list_id in IGNORED_LIST_IDS:
+                continue
+            for task in fetch_tasks_from_list(list_id, updated_after):
+                yield task
+    folderless_lists = fetch_folderless_lists(space_id)
+    for lst in folderless_lists:
+        list_id = lst.get("id")
+        if list_id in IGNORED_LIST_IDS:
+            continue
+        for task in fetch_tasks_from_list(list_id, updated_after):
+            yield task
+
+# ==== Преобразование задачи в HTML для Intercom ====
 def task_to_html(task: dict) -> str:
     name = task.get("name") or "(Без названия)"
     desc = task.get("description") or ""
-    
-    # ПРОСТОЙ HTML: только название и описание
     body_html = markdown(desc) if desc else "<p><em>Нет описания</em></p>"
-    
-    # Ограничиваем длину
     if len(body_html) > 50000:
-        body_html = body_html[:50000] + "<p><em>Описание урезано</em></p>"
-    
-    # Добавляем ссылку на задачу
+        body_html = body_html[:50000] + "<p><em>Описание урезано из-за длины</em></p>"
     task_url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
     footer = f"""
     <hr>
-    <p><small><a href="{html.escape(task_url)}" target="_blank">🔗 Открыть в ClickUp</a></small></p>
+    <p><small>Синхронизировано из ClickUp: <a href="{html.escape(task_url)}" target="_blank" rel="noopener">открыть задачу</a></small></p>
     """
-    
     return f"<h1>{html.escape(name)}</h1>{body_html}{footer}"
 
-# ==== Intercom: Поиск статьи по external_id (НАДЕЖНЕЕ) ====
-def find_article_by_external_id(external_id: str):
-    """Поиск статьи по external_id - более надежно чем по названию"""
+# ==== Intercom: Поиск существующей статьи по title ====
+def find_existing_article(title: str):
     endpoint = f"{INTERCOM_BASE}/internal_articles/search"
-    params = {"query": f"external_id:{external_id}"}
+    params = {"query": title}
     try:
         r = ic.get(endpoint, params=params)
         while _rate_limit_sleep(r):
             r = ic.get(endpoint, params=params)
         r.raise_for_status()
-        
         data = r.json()
-        articles = data.get("articles", [])
+        articles = data.get("articles", []) or data.get("data", {}).get("internal_articles", [])  # На случай разных форматов
         if articles:
-            logging.info(f"Found existing article by external_id {external_id}: ID {articles[0]['id']}")
+            logging.info(f"Found article: {title} (ID: {articles[0]['id']})")
             return articles[0]
         return None
     except Exception as e:
-        logging.error(f"Error searching article by external_id '{external_id}': {e}")
+        logging.error(f"Search error for '{title}': {e}")
         return None
 
 # ==== Intercom: Создание статьи ====
@@ -165,40 +197,33 @@ def create_internal_article(task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
     title = task.get("name") or "(Без названия)"
-    
     try:
         html_body = task_to_html(task)
-        
+        if len(html_body) > 50000:
+            html_body = html_body[:50000]
         payload = {
             "title": title[:255],
             "body": html_body,
             "owner_id": INTERCOM_OWNER_ID,
             "author_id": INTERCOM_AUTHOR_ID,
-            "locale": "en",
-            "external_id": task_id,  # КЛЮЧЕВОЕ: для синхронизации
+            "locale": "ru",  # Для русского контента
         }
-        
         if DRY_RUN:
-            logging.info(f"[DRY_RUN] Would CREATE: {title}")
+            logging.info(f"[DRY_RUN] Would create: {title}")
             return None
-        
-        logging.info(f"Creating article: {title}")
+        logging.info(f"Creating: {title}")
         r = ic.post(endpoint, json=payload)
-        logging.info(f"CREATE response: {r.status_code}")
-        
         while _rate_limit_sleep(r):
             r = ic.post(endpoint, json=payload)
-        
         if r.status_code in (200, 201):
             result = r.json()
-            logging.info(f"✅ CREATED: {title} (ID: {result.get('id')})")
+            logging.info(f"Created: {title} (ID: {result.get('id')})")
             return result.get('id')
         else:
-            logging.error(f"❌ CREATE failed: {r.status_code} {r.text[:200]}")
+            logging.error(f"Create failed: {r.status_code} {r.text}")
             return None
-            
     except Exception as e:
-        logging.error(f"❌ CREATE error for {task_id}: {e}")
+        logging.error(f"Create error for {task_id}: {e}")
         return None
 
 # ==== Intercom: Обновление статьи ====
@@ -206,48 +231,37 @@ def update_internal_article(article_id: str, task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles/{article_id}"
     title = task.get("name") or "(Без названия)"
-    
     try:
         html_body = task_to_html(task)
-        
+        if len(html_body) > 50000:
+            html_body = html_body[:50000]
         payload = {
             "title": title[:255],
             "body": html_body,
             "owner_id": INTERCOM_OWNER_ID,
             "author_id": INTERCOM_AUTHOR_ID,
-            "locale": "en",
-            "external_id": task_id,
+            "locale": "ru",
         }
-        
         if DRY_RUN:
-            logging.info(f"[DRY_RUN] Would UPDATE {article_id}: {title}")
+            logging.info(f"[DRY_RUN] Would update {article_id}: {title}")
             return
-        
-        logging.info(f"Updating article {article_id}: {title}")
+        logging.info(f"Updating {article_id}: {title}")
         r = ic.put(endpoint, json=payload)
-        logging.info(f"UPDATE response: {r.status_code}")
-        
         while _rate_limit_sleep(r):
             r = ic.put(endpoint, json=payload)
-        
         if r.status_code in (200, 201):
-            logging.info(f"✅ UPDATED: {title}")
+            logging.info(f"Updated: {title}")
         else:
-            logging.error(f"❌ UPDATE failed: {r.status_code} {r.text[:200]}")
-            
+            logging.error(f"Update failed: {r.status_code} {r.text}")
     except Exception as e:
-        logging.error(f"❌ UPDATE error for {task_id}: {e}")
+        logging.error(f"Update error for {task_id}: {e}")
 
-# ==== Главная функция upsert ====
+# ==== Intercom: upsert ====
 def upsert_internal_article(task: dict):
-    task_id = task.get("id")
     title = task.get("name") or "(Без названия)"
-    
-    # Ищем по external_id
-    existing = find_article_by_external_id(task_id)
-    
-    if existing:
-        update_internal_article(existing["id"], task)
+    existing_article = find_existing_article(title)
+    if existing_article:
+        update_internal_article(existing_article["id"], task)
     else:
         create_internal_article(task)
 
@@ -259,26 +273,21 @@ def main():
         updated_after = datetime.fromisoformat(last_sync_iso)
     else:
         updated_after = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
-    
-    logging.info(f"🚀 Starting sync after {updated_after.isoformat()}")
+    logging.info(f"Syncing tasks after {updated_after.isoformat()} from space {SPACE_ID}")
     count = 0
-    
     try:
-        for task in fetch_clickup_tasks(SPACE_ID, updated_after):
+        for task in fetch_clickup_tasks(updated_after, SPACE_ID):
             try:
                 upsert_internal_article(task)
                 count += 1
-                logging.info(f"Processed {count}: {task.get('name')[:50]}...")
             except Exception as e:
-                logging.error(f"Failed task {task.get('id')}: {e}")
-                continue
+                logging.exception(f"Failed task {task.get('id')}: {e}")
     except Exception as e:
-        logging.error(f"Sync error: {e}")
-    
+        logging.exception(f"Fetch error: {e}")
     now_iso = datetime.now(timezone.utc).isoformat()
     state["last_sync_iso"] = now_iso
     _save_state(state)
-    logging.info(f"✅ Done! Synced {count} articles")
+    logging.info(f"Done. Synced {count} items. Last sync: {now_iso}")
 
 if __name__ == "__main__":
     main()
