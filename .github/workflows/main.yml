@@ -35,4 +35,4 @@ jobs:
         SYNC_STATE_FILE: ${{ secrets.SYNC_STATE_FILE }}
         DRY_RUN: ${{ secrets.DRY_RUN }}
         FETCH_ALL: ${{ secrets.FETCH_ALL }}
-      run: python sync.py
+      run: python synch.py
