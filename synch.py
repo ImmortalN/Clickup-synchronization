@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 # ==== Загрузка переменных окружения ====
 load_dotenv()
 
-# ==== Конфигурация из окружения ====
+# ==== Конфигурация ====
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN")
 SPACE_ID = os.getenv("SPACE_ID", "90153590151")
 CLICKUP_ONLY_OPEN = os.getenv("CLICKUP_ONLY_OPEN", "true").lower() == "true"
@@ -67,7 +67,7 @@ def _rate_limit_sleep(resp: requests.Response):
         return True
     return False
 
-# ==== ClickUp: Получение папок и списков ====
+# ==== ClickUp: папки и списки ====
 def fetch_folders(space_id: str):
     base = f"https://api.clickup.com/api/v2/space/{space_id}/folder"
     r = cu.get(base, params={"archived": "false"})
@@ -92,7 +92,7 @@ def fetch_folderless_lists(space_id: str):
     r.raise_for_status()
     return r.json().get("lists", [])
 
-# ==== ClickUp: Получение задач из списка ====
+# ==== ClickUp: задачи из списка ====
 def fetch_tasks_from_list(list_id: str, updated_after: datetime):
     base = f"https://api.clickup.com/api/v2/list/{list_id}/task"
     page = 0
@@ -130,7 +130,7 @@ def fetch_tasks_from_list(list_id: str, updated_after: datetime):
 
     logging.info(f"Fetched {total} tasks from list {list_id}")
 
-# ==== Получение всех задач из пространства ====
+# ==== Получение всех задач ====
 def fetch_clickup_tasks(updated_after: datetime, space_id: str):
     total_tasks = 0
     # Папки
@@ -162,10 +162,11 @@ def fetch_clickup_tasks(updated_after: datetime, space_id: str):
 
     logging.info(f"Total fetched tasks: {total_tasks}")
 
-# ==== Преобразование задачи в HTML для Intercom ====
+# ==== Преобразование задачи в HTML ====
 def task_to_html(task: dict) -> str:
+    # Берём description, если пусто — text_content
+    desc = task.get("description") or task.get("text_content") or ""
     name = task.get("name") or "(Без названия)"
-    desc = task.get("description") or ""
     body_html = markdown(desc) if desc else "<p><em>Нет описания</em></p>"
 
     status = (task.get("status") or {}).get("status") or "—"
@@ -184,11 +185,10 @@ def task_to_html(task: dict) -> str:
         <div><strong>ClickUp:</strong> <a href="{html.escape(task_url)}" target="_blank" rel="noopener">открыть задачу</a></div>
     </div>
     """
-
     title_html = f"<h1>{html.escape(name)}</h1>"
     return title_html + meta + body_html
 
-# ==== Intercom: создание / обновление External Page ====
+# ==== Intercom: создание / обновление страницы ====
 def upsert_external_page(task: dict):
     task_id = task.get("id")
     title = task.get("name") or "(Без названия)"
@@ -233,25 +233,23 @@ def main():
     else:
         updated_after = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
 
-    logging.info(f"Syncing ClickUp tasks{' (all tasks)' if FETCH_ALL else f' updated after {updated_after}'} from space {SPACE_ID}")
-
+    logging.info(f"Syncing ClickUp tasks{' (all)' if FETCH_ALL else f' updated after {updated_after}'} from space {SPACE_ID}")
     count = 0
+
     try:
         for task in fetch_clickup_tasks(updated_after, SPACE_ID):
             try:
                 upsert_external_page(task)
                 count += 1
-                time.sleep(0.1)  # Rate limit
             except Exception as e:
                 logging.exception(f"Failed to process task {task.get('id')}: {e}")
                 continue
     except Exception as e:
         logging.exception(f"Error in fetch_clickup_tasks: {e}")
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    state["last_sync_iso"] = now_iso
+    state["last_sync_iso"] = datetime.now(timezone.utc).isoformat()
     _save_state(state)
-    logging.info(f"Done. Synced items: {count}. New last_sync_iso = {now_iso}")
+    logging.info(f"Done. Synced items: {count}")
 
 if __name__ == "__main__":
     main()
