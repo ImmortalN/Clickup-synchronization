@@ -1,12 +1,13 @@
-name: Test Sync Script
+name: ClickUp to Intercom Sync
 
 on:
-  workflow_dispatch:  # Только ручной запуск для теста
+  schedule:
+    - cron: '0 3 * * *'  # Каждый день в 6:00 MSK
+  workflow_dispatch:
 
 jobs:
-  test:
+  sync:
     runs-on: ubuntu-latest
-    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -17,43 +18,10 @@ jobs:
         python-version: '3.12'
         
     - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
-        
-    - name: Test Environment Variables
+      run: pip install -r requirements.txt
+      
+    - name: Run sync script
       env:
-        CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
-        CLICKUP_TEAM_ID: ${{ secrets.CLICKUP_TEAM_ID }}
-        SPACE_ID: ${{ secrets.SPACE_ID }}
-        INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
-        INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
-        INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
-        INTERCOM_REGION: ${{ secrets.INTERCOM_REGION }}
-        INTERCOM_VERSION: ${{ secrets.INTERCOM_VERSION }}
-        CLICKUP_ONLY_OPEN: ${{ secrets.CLICKUP_ONLY_OPEN }}
-        CLICKUP_UPDATED_LOOKBACK_HOURS: ${{ secrets.CLICKUP_UPDATED_LOOKBACK_HOURS }}
-        SYNC_STATE_FILE: ${{ secrets.SYNC_STATE_FILE }}
-        DRY_RUN: ${{ secrets.DRY_RUN }}
-        FETCH_ALL: ${{ secrets.FETCH_ALL }}
-      run: |
-        echo "=== ENVIRONMENT TEST ==="
-        echo "CLICKUP_API_TOKEN: ${{ env.CLICKUP_API_TOKEN != '' && 'OK' || 'MISSING' }}"
-        echo "INTERCOM_ACCESS_TOKEN: ${{ env.INTERCOM_ACCESS_TOKEN != '' && 'OK' || 'MISSING' }}"
-        echo "INTERCOM_OWNER_ID: ${{ env.INTERCOM_OWNER_ID != '' && 'OK' || 'MISSING' }}"
-        
-        # Тест int конвертации
-        echo "Testing int conversion..."
-        python -c "
-import os
-owner_id = int(os.getenv('INTERCOM_OWNER_ID'))
-author_id = int(os.getenv('INTERCOM_AUTHOR_ID'))
-print(f'OWNER_ID OK: {owner_id}')
-print(f'AUTHOR_ID OK: {author_id}')
-"
-        
-    - name: Run Simple Sync Test
-      env:
-        # Все env vars как выше
         CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
         CLICKUP_TEAM_ID: ${{ secrets.CLICKUP_TEAM_ID }}
         SPACE_ID: ${{ secrets.SPACE_ID }}
