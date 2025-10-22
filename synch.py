@@ -191,29 +191,71 @@ def fetch_clickup_tasks(updated_after, space_id):
     print(f"✅ Всего задач: {total}")
 
 # ==== INTERCOM ФУНКЦИИ (УПРОЩЁННЫЕ) ====
+# ==== ПОЛНАЯ ФУНКЦИЯ КОНТЕНТА ИЗ CLICKUP ====
+def task_to_html(task):
+    """Конвертирует задачу ClickUp в полный HTML для Intercom"""
+    name = task.get("name", "Без названия")
+    desc = task.get("description", "")
+    status = task.get("status", {}).get("status", "—")
+    assignees = ", ".join([a.get("username", a.get("email", "—")) for a in task.get("assignees", [])]) or "—"
+    priority = task.get("priority", {}).get("name", "—")
+    due = task.get("due_date")
+    due_str = datetime.fromtimestamp(int(due)/1000).strftime("%Y-%m-%d") if due else "—"
+    task_url = task.get("url", f"https://app.clickup.com/t/{task['id']}")
+    
+    # Конвертируем Markdown описание в HTML
+    body_html = markdown(desc) if desc else "<p><em>Нет описания</em></p>"
+    
+    # Мета-информация
+    meta_html = f"""
+    <div style="background:#f8f9fa;padding:16px;border-radius:8px;margin-bottom:20px;border-left:4px solid #007cba;">
+        <h3>📋 Информация о задаче</h3>
+        <p><strong>Статус:</strong> {html.escape(status)}</p>
+        <p><strong>Исполнители:</strong> {html.escape(assignees)}</p>
+        <p><strong>Приоритет:</strong> {html.escape(priority)}</p>
+        <p><strong>Дедлайн:</strong> {html.escape(due_str)}</p>
+        <p><strong><a href="{html.escape(task_url)}" target="_blank">🔗 Открыть в ClickUp</a></strong></p>
+    </div>
+    """
+    
+    # Полный HTML
+    full_html = f"""
+    <h1>{html.escape(name)}</h1>
+    {meta_html}
+    {body_html}
+    """
+    
+    # Обрезаем если слишком длинно (Intercom лимит)
+    if len(full_html) > 50000:
+        full_html = full_html[:50000] + "<p><em>... (содержимое урезано)</em></p>"
+    
+    return full_html
+
+# ==== ОБНОВЛЁННАЯ ФУНКЦИЯ СОЗДАНИЯ ====
 def create_internal_article(task):
     title = task.get("name", "Без названия")
     print(f"📝 Создаём статью: {title}")
     
+    # ПОЛНЫЙ КОНТЕНТ!
+    full_body = task_to_html(task)
+    print(f"   📄 Длина контента: {len(full_body)} символов")
+    
     payload = {
         "title": title[:255],
-        "body": f"<h1>{title}</h1><p>Синхронизировано из ClickUp</p>",
-        "owner_id": INTERCOM_OWNER_ID,
-        "author_id": INTERCOM_AUTHOR_ID,
-        "locale": "en"
+        "body": full_body,
+        "locale": "en",
+        "state": "published"
     }
     
-    if DRY_RUN:
-        print(f"   [DRY_RUN] НЕ создаём")
-        return "test_id"
-    
-    r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+    r = ic.post(f"{INTERCOM_BASE}/articles", json=payload)
     print(f"   Статус: {r.status_code}")
+    
     if r.status_code in (200, 201):
-        print(f"✅ Статья создана!")
-        return r.json().get("id")
+        result = r.json()
+        print(f"✅ Статья создана! ID: {result.get('id')}")
+        return result.get("id")
     else:
-        print(f"❌ Ошибка: {r.text}")
+        print(f"❌ Ошибка: {r.status_code} {r.text[:100]}")
         return None
 
 # ==== ГЛАВНАЯ ФУНКЦИЯ ====
