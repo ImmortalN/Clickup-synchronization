@@ -164,7 +164,7 @@ def fetch_clickup_tasks(updated_after: datetime, space_id: str):
         list_id = lst.get("id")
         if list_id in IGNORED_LIST_IDS:
             logging.info(f"Skipping ignored list: {lst.get('name')} (ID: {list_id})")
-                continue
+            continue
         for task in fetch_tasks_from_list(list_id, updated_after):
             yield task
 
@@ -225,13 +225,13 @@ def create_internal_article(task: dict):
             r = ic.post(endpoint, json=payload)
         if r.status_code in (200, 201):
             result = r.json()
-            logging.info(f"✅ Created: {title} (ID: {result.get('id')})")
+            logging.info(f"Created: {title} (ID: {result.get('id')})")
             return result.get('id')
         else:
-            logging.error(f"❌ Create failed: {r.status_code} {r.text}")
+            logging.error(f"Create failed: {r.status_code} {r.text}")
             return None
     except Exception as e:
-        logging.error(f"❌ Create error for {task_id}: {e}")
+        logging.error(f"Create error for {task_id}: {e}")
         return None
 
 # ==== Intercom: upsert (только создание новых) ====
@@ -240,7 +240,7 @@ def upsert_internal_article(task: dict):
     original_title = task.get("name") or "(Без названия)"
     existing_article = find_existing_article(original_title, task_id)
     if existing_article:
-        logging.info(f"⏭️ Skipping existing: {original_title} (Intercom ID: {existing_article['id']}, Task ID: {task_id})")
+        logging.info(f"Skipping existing: {original_title} (Intercom ID: {existing_article['id']}, Task ID: {task_id})")
     else:
         create_internal_article(task)
 
