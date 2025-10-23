@@ -18,7 +18,7 @@ CLICKUP_ONLY_OPEN = os.getenv("CLICKUP_ONLY_OPEN", "true").lower() == "true"
 LOOKBACK_HOURS = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
-INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")
+INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "2.14")
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID"))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 SYNC_STATE_FILE = os.getenv("SYNC_STATE_FILE", ".sync_state.json")
@@ -199,7 +199,7 @@ def task_to_html(task: dict) -> str:
 # ==== Intercom: Поиск существующей статьи по title (с улучшенным поиском) ====
 def find_existing_article(title: str, task_id: str):
     # Ищем по оригинальному title + с [ID] для уникальности
-    search_queries = [title, f"{title} [{task_id}]"]
+    search_queries = [title, f"{title} [ClickUp-{task_id}]"]
     endpoint = f"{INTERCOM_BASE}/internal_articles/search"
     for query in search_queries:
         params = {"query": query}
@@ -211,10 +211,12 @@ def find_existing_article(title: str, task_id: str):
                 logging.info(f"Retry search: status {r.status_code}, body: {r.text[:500]}...")
             r.raise_for_status()
             data = r.json()
-            articles = data.get("articles", []) or data.get("data", {}).get("internal_articles", [])
-            if articles:
-                logging.info(f"Found existing article for '{title}' via query '{query}': ID {articles[0]['id']}")
-                return articles[0]
+            articles = data.get("data", []) or data.get("articles", []) or data.get("data", {}).get("internal_articles", [])
+            for article in articles:
+                art_title = article.get("title", "").strip().lower()
+                if art_title == query.strip().lower():
+                    logging.info(f"Found existing article for '{title}' via query '{query}': ID {article.get('id')}")
+                    return article
         except Exception as e:
             logging.error(f"Search error for '{query}': {e}")
             continue
@@ -224,7 +226,11 @@ def find_existing_article(title: str, task_id: str):
 def create_internal_article(task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
-    title = f"{task.get('name') or '(Без названия)'} [{task_id}]"  # Уникальный title с ID
+    original_title = task.get('name') or '(Без названия)'
+    title = f"{original_title} [ClickUp-{task_id}]"  # Уникальный title с ID
+    if find_existing_article(original_title, task_id):
+        logging.info(f"Article already exists: {title}")
+        return None
     try:
         html_body = task_to_html(task)
         if len(html_body) > 50000:
@@ -276,10 +282,10 @@ def cleanup_duplicates():
     endpoint = f"{INTERCOM_BASE}/internal_articles"
     r = ic.get(endpoint)
     r.raise_for_status()
-    articles = r.json().get("articles", [])
+    articles = r.json().get("articles", []) or r.json().get("data", [])
     title_to_ids = {}
     for article in articles:
-        title = article.get("title", "").rstrip(" []")  # Убираем [ID] для матчинга
+        title = article.get("title", "").rstrip(" []").split("[ClickUp-")[0].strip()  # Убираем [ID] для матчинга
         if title not in title_to_ids:
             title_to_ids[title] = []
         title_to_ids[title].append(article["id"])
@@ -288,7 +294,7 @@ def cleanup_duplicates():
     for title, ids in title_to_ids.items():
         if len(ids) > 1:
             # Оставляем первый (самый старый, по ID)
-            to_delete = ids[1:]  # Все кроме первого
+            to_delete = sorted(ids)[1:]  # Сортируем ID, предполагая числовые ID, старые меньше
             for del_id in to_delete:
                 delete_endpoint = f"{INTERCOM_BASE}/internal_articles/{del_id}"
                 dr = ic.delete(delete_endpoint)
