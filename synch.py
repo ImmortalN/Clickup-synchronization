@@ -280,12 +280,12 @@ def update_internal_article(article_id: str, task: dict):
     except Exception as e:
         logging.error(f"Update error for {task_id}: {e}")
 
-# ==== Intercom: upsert ====
+# ==== Intercom: upsert (только создание новых, без обновлений) ====
 def upsert_internal_article(task: dict):
     title = task.get("name") or "(Без названия)"
     existing_article = find_existing_article(title)
     if existing_article:
-        update_internal_article(existing_article["id"], task)
+        logging.info(f"Skipping existing article: {title} (ID: {existing_article['id']})")  # Пропускаем обновление
     else:
         create_internal_article(task)
 
