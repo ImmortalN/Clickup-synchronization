@@ -24,7 +24,7 @@ INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 SYNC_STATE_FILE = os.getenv("SYNC_STATE_FILE", ".sync_state.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
-SPACE_ID = "90125205902"  # ИСПРАВЛЕНО: Правильный ID пространства из вашего примера задачи
+SPACE_ID = "90125205902"  # Правильный ID пространства
 
 IGNORED_LIST_IDS = ["901509433569", "901509402998"]  # Forms и ChangeLog
 
@@ -189,12 +189,7 @@ def task_to_html(task: dict) -> str:
     body_html = markdown(desc) if desc else "<p><em>Нет описания</em></p>"
     if len(body_html) > 50000:
         body_html = body_html[:50000] + "<p><em>Описание урезано из-за длины</em></p>"
-    task_url = task.get("url") or f"https://app.clickup.com/t/{task.get('id')}"
-    footer = f"""
-    <hr>
-    <p><small>Синхронизировано из ClickUp: <a href="{html.escape(task_url)}" target="_blank" rel="noopener">открыть задачу</a></small></p>
-    """
-    return f"<h1>{html.escape(name)}</h1>{body_html}{footer}"
+    return f"<h1>{html.escape(name)}</h1>{body_html}"
 
 # ==== Intercom: Поиск существующей статьи по title ====
 def find_existing_article(title: str):
