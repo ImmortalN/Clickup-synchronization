@@ -26,7 +26,7 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
 SPACE_ID = "90125205902"  # Правильный ID пространства
 
-IGNORED_LIST_IDS = ["901509433569", "901509402998"]  # Forms и ChangeLog
+IGNORED_LIST_IDS = ["8cjzjmb-34452", "8cjzjmb-30872"]  # FORM и Changelog
 
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
@@ -171,6 +171,7 @@ def fetch_clickup_tasks(updated_after: datetime, space_id: str):
         for lst in lists:
             list_id = lst.get("id")
             if list_id in IGNORED_LIST_IDS:
+                logging.info(f"Skipping ignored list: {lst.get('name')} (ID: {list_id})")
                 continue
             for task in fetch_tasks_from_list(list_id, updated_after):
                 yield task
@@ -178,6 +179,7 @@ def fetch_clickup_tasks(updated_after: datetime, space_id: str):
     for lst in folderless_lists:
         list_id = lst.get("id")
         if list_id in IGNORED_LIST_IDS:
+            logging.info(f"Skipping ignored list: {lst.get('name')} (ID: {list_id})")
             continue
         for task in fetch_tasks_from_list(list_id, updated_after):
             yield task
@@ -191,32 +193,35 @@ def task_to_html(task: dict) -> str:
         body_html = body_html[:50000] + "<p><em>Описание урезано из-за длины</em></p>"
     return f"<h1>{html.escape(name)}</h1>{body_html}"
 
-# ==== Intercom: Поиск существующей статьи по title ====
-def find_existing_article(title: str):
+# ==== Intercom: Поиск существующей статьи по title (с улучшенным поиском) ====
+def find_existing_article(title: str, task_id: str):
+    # Ищем по оригинальному title + с [ID] для уникальности
+    search_queries = [title, f"{title} [{task_id}]"]
     endpoint = f"{INTERCOM_BASE}/internal_articles/search"
-    params = {"query": title}
-    try:
-        r = ic.get(endpoint, params=params)
-        logging.info(f"Search response for '{title}': status {r.status_code}, body: {r.text[:500]}...")
-        while _rate_limit_sleep(r):
+    for query in search_queries:
+        params = {"query": query}
+        try:
             r = ic.get(endpoint, params=params)
-            logging.info(f"Retry search: status {r.status_code}, body: {r.text[:500]}...")
-        r.raise_for_status()
-        data = r.json()
-        articles = data.get("articles", []) or data.get("data", {}).get("internal_articles", [])
-        if articles:
-            logging.info(f"Found article: {title} (ID: {articles[0]['id']})")
-            return articles[0]
-        return None
-    except Exception as e:
-        logging.error(f"Search error for '{title}': {e}")
-        return None
+            logging.info(f"Search response for '{query}': status {r.status_code}, body: {r.text[:500]}...")
+            while _rate_limit_sleep(r):
+                r = ic.get(endpoint, params=params)
+                logging.info(f"Retry search: status {r.status_code}, body: {r.text[:500]}...")
+            r.raise_for_status()
+            data = r.json()
+            articles = data.get("articles", []) or data.get("data", {}).get("internal_articles", [])
+            if articles:
+                logging.info(f"Found existing article for '{title}' via query '{query}': ID {articles[0]['id']}")
+                return articles[0]
+        except Exception as e:
+            logging.error(f"Search error for '{query}': {e}")
+            continue
+    return None
 
 # ==== Intercom: Создание статьи ====
 def create_internal_article(task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
-    title = task.get("name") or "(Без названия)"
+    title = f"{task.get('name') or '(Без названия)'} [{task_id}]"  # Уникальный title с ID
     try:
         html_body = task_to_html(task)
         if len(html_body) > 50000:
@@ -231,7 +236,7 @@ def create_internal_article(task: dict):
         if DRY_RUN:
             logging.info(f"[DRY_RUN] Would create: {title}")
             return None
-        logging.info(f"Creating: {title}")
+        logging.info(f"Creating new: {title}")
         r = ic.post(endpoint, json=payload)
         logging.info(f"Create response: status {r.status_code}, body: {r.text[:500]}...")
         while _rate_limit_sleep(r):
@@ -239,58 +244,69 @@ def create_internal_article(task: dict):
             logging.info(f"Retry create: status {r.status_code}, body: {r.text[:500]}...")
         if r.status_code in (200, 201):
             result = r.json()
-            logging.info(f"Created: {title} (ID: {result.get('id')})")
+            logging.info(f"✅ Created: {title} (ID: {result.get('id')})")
             return result.get('id')
         else:
-            logging.error(f"Create failed: {r.status_code} {r.text}")
+            logging.error(f"❌ Create failed: {r.status_code} {r.text}")
             return None
     except Exception as e:
-        logging.error(f"Create error for {task_id}: {e}")
+        logging.error(f"❌ Create error for {task_id}: {e}")
         return None
 
-# ==== Intercom: Обновление статьи ====
-def update_internal_article(article_id: str, task: dict):
-    task_id = task.get("id")
-    endpoint = f"{INTERCOM_BASE}/internal_articles/{article_id}"
-    title = task.get("name") or "(Без названия)"
-    try:
-        html_body = task_to_html(task)
-        if len(html_body) > 50000:
-            html_body = html_body[:50000]
-        payload = {
-            "title": title[:255],
-            "body": html_body,
-            "owner_id": INTERCOM_OWNER_ID,
-            "author_id": INTERCOM_AUTHOR_ID,
-            "locale": "ru",
-        }
-        if DRY_RUN:
-            logging.info(f"[DRY_RUN] Would update {article_id}: {title}")
-            return
-        logging.info(f"Updating {article_id}: {title}")
-        r = ic.put(endpoint, json=payload)
-        logging.info(f"Update response: status {r.status_code}, body: {r.text[:500]}...")
-        while _rate_limit_sleep(r):
-            r = ic.put(endpoint, json=payload)
-            logging.info(f"Retry update: status {r.status_code}, body: {r.text[:500]}...")
-        if r.status_code in (200, 201):
-            logging.info(f"Updated: {title}")
-        else:
-            logging.error(f"Update failed: {r.status_code} {r.text}")
-    except Exception as e:
-        logging.error(f"Update error for {task_id}: {e}")
+# ==== Intercom: Обновление статьи (если нужно; сейчас закомментировано для "только новых") ====
+# def update_internal_article(article_id: str, task: dict):
+#     # ... (код обновления, если раскомментируешь)
 
-# ==== Intercom: upsert (только создание новых, без обновлений) ====
+# ==== Intercom: upsert (только создание новых, с уникальностью) ====
 def upsert_internal_article(task: dict):
-    title = task.get("name") or "(Без названия)"
-    existing_article = find_existing_article(title)
+    task_id = task.get("id")
+    original_title = task.get("name") or "(Без названия)"
+    existing_article = find_existing_article(original_title, task_id)
     if existing_article:
-        logging.info(f"Skipping existing article: {title} (ID: {existing_article['id']})")  # Пропускаем обновление
+        logging.info(f"⏭️ Skipping existing: {original_title} (Intercom ID: {existing_article['id']}, Task ID: {task_id})")
     else:
         create_internal_article(task)
 
+# ==== Функция для очистки дублей (запустить ОДИН РАЗ вручную) ====
+def cleanup_duplicates():
+    """Удаляет дубликаты по title, оставляя только первый (самый старый)."""
+    if DRY_RUN:
+        logging.info("[DRY_RUN] Would cleanup duplicates")
+        return
+    logging.info("🔄 Starting duplicate cleanup...")
+    endpoint = f"{INTERCOM_BASE}/internal_articles"
+    r = ic.get(endpoint)
+    r.raise_for_status()
+    articles = r.json().get("articles", [])
+    title_to_ids = {}
+    for article in articles:
+        title = article.get("title", "").rstrip(" []")  # Убираем [ID] для матчинга
+        if title not in title_to_ids:
+            title_to_ids[title] = []
+        title_to_ids[title].append(article["id"])
+    
+    deleted = 0
+    for title, ids in title_to_ids.items():
+        if len(ids) > 1:
+            # Оставляем первый (самый старый, по ID)
+            to_delete = ids[1:]  # Все кроме первого
+            for del_id in to_delete:
+                delete_endpoint = f"{INTERCOM_BASE}/internal_articles/{del_id}"
+                dr = ic.delete(delete_endpoint)
+                if dr.status_code in (200, 204):
+                    logging.info(f"🗑️ Deleted duplicate: {title} (ID: {del_id})")
+                    deleted += 1
+                else:
+                    logging.error(f"Failed to delete {del_id}: {dr.status_code}")
+    logging.info(f"Cleanup done: Deleted {deleted} duplicates")
+
 # ==== Главный процесс ====
 def main():
+    # Если CLEANUP_DUPLICATES=true в env, запусти очистку
+    if os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true":
+        cleanup_duplicates()
+        return
+    
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
     if last_sync_iso and not FETCH_ALL:
@@ -307,11 +323,16 @@ def main():
         return  # Прерываем, если нет доступа
     
     count = 0
+    skipped = 0
     try:
         for task in fetch_clickup_tasks(updated_after, SPACE_ID):
             try:
-                upsert_internal_article(task)
-                count += 1
+                existing = find_existing_article(task.get("name") or "", task.get("id"))
+                if existing:
+                    skipped += 1
+                else:
+                    create_internal_article(task)
+                    count += 1
             except Exception as e:
                 logging.exception(f"Failed task {task.get('id')}: {e}")
     except Exception as e:
@@ -319,7 +340,7 @@ def main():
     now_iso = datetime.now(timezone.utc).isoformat()
     state["last_sync_iso"] = now_iso
     _save_state(state)
-    logging.info(f"Done. Synced {count} items. Last sync: {now_iso}")
+    logging.info(f"Done. Created {count} new, skipped {skipped} existing. Last sync: {now_iso}")
 
 if __name__ == "__main__":
     main()
