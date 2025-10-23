@@ -24,7 +24,7 @@ INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 SYNC_STATE_FILE = os.getenv("SYNC_STATE_FILE", ".sync_state.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
-SPACE_ID = "90153590151"  # Hardcoded for "Croco KB"
+SPACE_ID = "90125205902"  # ИСПРАВЛЕНО: Правильный ID пространства из вашего примера задачи
 
 IGNORED_LIST_IDS = ["901509433569", "901509402998"]  # Forms и ChangeLog
 
@@ -42,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 # ==== Сессии ====
 cu = requests.Session()
 cu.headers.update({
-    "Authorization": CLICKUP_TOKEN,  # Без Bearer для личного токена (pk_...)
+    "Authorization": CLICKUP_TOKEN,  # Без Bearer для личного токена
     "Content-Type": "application/json"
 })
 cu.timeout = 10
