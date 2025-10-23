@@ -26,7 +26,7 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
 SPACE_ID = "90125205902"  # Правильный ID пространства
 
-IGNORED_LIST_IDS = ["8cjzjmb-34452", "8cjzjmb-30872"]  # FORM и Changelog
+IGNORED_LIST_IDS = ["901212763746", "901212791461"]  # FORM и Changelog
 
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
