@@ -30,6 +30,9 @@ SPACE_ID = "90125205902"  # Правильный ID пространства
 
 IGNORED_LIST_IDS = ["901212791461", "901212763746"]  # FORM и Changelog (обновлённые ID)
 
+# Для теста: Ограничить количество задач на list
+TEST_LIMIT_TASKS = 10  # Только 10 задач для теста удаления
+
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
 assert CLICKUP_TEAM_ID, "CLICKUP_TEAM_ID is required"
@@ -224,7 +227,7 @@ def find_existing_article(title: str, task_id: str):
 def create_internal_article(task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
-    title = f"{task.get('name') or '(Без названия)'} [{task_id}]"  # Уникальный title
+    title = task.get("name") or "(Без названия)"
     try:
         html_body = task_to_html(task)
         if len(html_body) > 50000:
@@ -256,22 +259,54 @@ def create_internal_article(task: dict):
         logging.error(f"Create error for {task_id}: {e}")
         return None
 
-# ==== Intercom: upsert (только создание новых, с уникальностью) ====
-def upsert_internal_article(task: dict):
+# ==== Intercom: Обновление статьи ====
+def update_internal_article(article_id: str, task: dict):
     task_id = task.get("id")
+    endpoint = f"{INTERCOM_BASE}/internal_articles/{article_id}"
     title = task.get("name") or "(Без названия)"
-    existing_article = find_existing_article(title, task_id)
+    try:
+        html_body = task_to_html(task)
+        if len(html_body) > 50000:
+            html_body = html_body[:50000]
+        payload = {
+            "title": title[:255],
+            "body": html_body,
+            "owner_id": INTERCOM_OWNER_ID,
+            "author_id": INTERCOM_AUTHOR_ID,
+            "locale": "ru",
+        }
+        if DRY_RUN:
+            logging.info(f"[DRY_RUN] Would update {article_id}: {title}")
+            return
+        logging.info(f"Updating {article_id}: {title}")
+        r = ic.put(endpoint, json=payload)
+        logging.info(f"Update response: status {r.status_code}, body: {r.text[:500]}...")
+        while _rate_limit_sleep(r):
+            r = ic.put(endpoint, json=payload)
+            logging.info(f"Retry update: status {r.status_code}, body: {r.text[:500]}...")
+        if r.status_code in (200, 201):
+            logging.info(f"Updated: {title}")
+        else:
+            logging.error(f"Update failed: {r.status_code} {r.text}")
+    except Exception as e:
+        logging.error(f"Update error for {task_id}: {e}")
+
+# ==== Intercom: upsert ====
+def upsert_internal_article(task: dict):
+    title = task.get("name") or "(Без названия)"
+    existing_article = find_existing_article(title, task.get("id"))
     if existing_article:
-        logging.info(f"Skipping existing: {title} (ID: {existing_article['id']})")
+        update_internal_article(existing_article["id"], task)
     else:
         create_internal_article(task)
 
-# ==== Функция удаления гайдов из ignored lists ====
+# ==== Функция удаления гайдов из ignored lists (тестовая версия с лимитом 10) ====
 def delete_guides_from_ignored_lists():
-    logging.info("Starting deletion from ignored lists")
+    logging.info("Starting test deletion from ignored lists (limited to 10 tasks per list)")
     deleted_count = 0
     for list_id in IGNORED_LIST_IDS:
         tasks = fetch_tasks_from_list(list_id)
+        tasks = tasks[:TEST_LIMIT_TASKS]  # Ограничение для теста
         for task in tasks:
             title = task.get("name") or "(Без названия)"
             task_id = task.get("id")
@@ -282,6 +317,10 @@ def delete_guides_from_ignored_lists():
                     logging.info(f"[DRY_RUN] Would delete: {title} (ID: {existing_article['id']})")
                     continue
                 r = ic.delete(endpoint)
+                logging.info(f"Delete response: status {r.status_code}, body: {r.text[:500]}...")
+                while _rate_limit_sleep(r):
+                    r = ic.delete(endpoint)
+                    logging.info(f"Retry delete: status {r.status_code}, body: {r.text[:500]}...")
                 if r.status_code in (200, 204):
                     logging.info(f"Deleted: {title} (ID: {existing_article['id']})")
                     deleted_count += 1
@@ -289,7 +328,7 @@ def delete_guides_from_ignored_lists():
                     logging.error(f"Delete failed for {title}: {r.status_code} {r.text}")
             else:
                 logging.info(f"No guide found for {title} (task {task_id})")
-    logging.info(f"Deletion done: Deleted {deleted_count} guides")
+    logging.info(f"Test deletion done: Deleted {deleted_count} guides from limited tasks")
 
 # ==== Функция очистки дублей ====
 def cleanup_duplicates():
