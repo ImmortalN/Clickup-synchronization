@@ -13,7 +13,7 @@ load_dotenv()
 
 # ==== Конфигурация из окружения ====
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN")
-CLICKUP_TEAM_ID = os.getenv("CLICKUP_TEAM_ID")  # Вернул для проверки доступа
+CLICKUP_TEAM_ID = os.getenv("CLICKUP_TEAM_ID")  # Для проверки доступа
 CLICKUP_ONLY_OPEN = os.getenv("CLICKUP_ONLY_OPEN", "true").lower() == "true"
 LOOKBACK_HOURS = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
@@ -30,7 +30,7 @@ IGNORED_LIST_IDS = ["901509433569", "901509402998"]  # Forms и ChangeLog
 
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
-assert CLICKUP_TEAM_ID, "CLICKUP_TEAM_ID is required"  # Добавил assert
+assert CLICKUP_TEAM_ID, "CLICKUP_TEAM_ID is required"
 assert INTERCOM_TOKEN, "INTERCOM_ACCESS_TOKEN is required"
 assert INTERCOM_OWNER_ID, "INTERCOM_OWNER_ID is required"
 assert INTERCOM_AUTHOR_ID, "INTERCOM_AUTHOR_ID is required"
@@ -42,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 # ==== Сессии ====
 cu = requests.Session()
 cu.headers.update({
-    "Authorization": f"Bearer {CLICKUP_TOKEN}",  # Добавил Bearer обратно
+    "Authorization": CLICKUP_TOKEN,  # Без Bearer для личного токена (pk_...)
     "Content-Type": "application/json"
 })
 cu.timeout = 10
@@ -158,7 +158,7 @@ def fetch_tasks_from_list(list_id: str, updated_after: datetime):
             break
         for t in batch:
             desc = t.get('markdown_description') or t.get('description') or ""
-            t['description'] = desc  # Fallback to description if no markdown
+            t['description'] = desc  # Fallback
             yield t
         page += 1
 
@@ -222,7 +222,6 @@ def create_internal_article(task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
     title = task.get("name") or "(Без названия)"
-    # title = f"{title} [{task_id}]"  # Раскомментируйте, если titles не уникальные и search фейлится
     try:
         html_body = task_to_html(task)
         if len(html_body) > 50000:
@@ -259,7 +258,6 @@ def update_internal_article(article_id: str, task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles/{article_id}"
     title = task.get("name") or "(Без названия)"
-    # title = f"{title} [{task_id}]"  # Раскомментируйте, если titles не уникальные
     try:
         html_body = task_to_html(task)
         if len(html_body) > 50000:
