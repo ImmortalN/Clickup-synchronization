@@ -24,6 +24,8 @@ INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 SYNC_STATE_FILE = os.getenv("SYNC_STATE_FILE", ".sync_state.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
+DELETE_MODE = os.getenv("DELETE_MODE", "false").lower() == "true"  # Режим удаления
+CLEANUP_DUPLICATES = os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true"  # Очистка дублей
 SPACE_ID = "90125205902"  # Правильный ID пространства
 
 IGNORED_LIST_IDS = ["901212791461", "901212763746"]  # FORM и Changelog (обновлённые ID)
