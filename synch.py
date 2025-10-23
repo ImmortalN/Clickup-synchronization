@@ -26,7 +26,7 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
 SPACE_ID = "90125205902"  # Правильный ID пространства
 
-IGNORED_LIST_IDS = ["8cjzjmb-34452", "8cjzjmb-30872"]  # FORM и Changelog
+IGNORED_LIST_IDS = ["901212791461", "901212763746"]  # FORM и Changelog
 
 # Тестовый режим: Ограничение на количество задач для обработки (для теста 5 гайдов)
 TEST_LIMIT = 5  # Обрабатываем только первые 5 задач из ClickUp для теста
