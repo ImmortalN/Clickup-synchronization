@@ -13,7 +13,7 @@ load_dotenv()
 
 # ==== Конфигурация из окружения ====
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN")
-CLICKUP_TEAM_ID = os.getenv("CLICKUP_TEAM_ID")  # Для проверки доступа
+CLICKUP_TEAM_ID = os.getenv("CLICKUP_TEAM_ID")
 CLICKUP_ONLY_OPEN = os.getenv("CLICKUP_ONLY_OPEN", "true").lower() == "true"
 LOOKBACK_HOURS = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
@@ -24,12 +24,8 @@ INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 SYNC_STATE_FILE = os.getenv("SYNC_STATE_FILE", ".sync_state.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
-SPACE_ID = "90125205902"  # Правильный ID пространства
-
+SPACE_ID = "90125205902"
 IGNORED_LIST_IDS = ["901212791461", "901212763746"]  # FORM и Changelog
-
-# Тестовый режим: Ограничение на количество задач для обработки (для теста 5 гайдов)
-TEST_LIMIT = 5  # Обрабатываем только первые 5 задач из ClickUp для теста
 
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
@@ -45,7 +41,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 # ==== Сессии ====
 cu = requests.Session()
 cu.headers.update({
-    "Authorization": CLICKUP_TOKEN,  # Без Bearer для личного токена
+    "Authorization": CLICKUP_TOKEN,
     "Content-Type": "application/json"
 })
 cu.timeout = 10
@@ -78,15 +74,12 @@ def _rate_limit_sleep(resp: requests.Response):
         return True
     return False
 
-# ==== Проверка доступа к team (для диагностики) ====
+# ==== Проверка доступа к team ====
 def check_team_access(team_id: str):
     base = f"https://api.clickup.com/api/v2/team/{team_id}"
-    logging.info(f"Checking access to team {team_id}")
     r = cu.get(base)
-    logging.info(f"Team check response: status {r.status_code}, body: {r.text[:500]}...")
     while _rate_limit_sleep(r):
         r = cu.get(base)
-        logging.info(f"Retry team check: status {r.status_code}, body: {r.text[:500]}...")
     r.raise_for_status()
     logging.info(f"Team access OK: {r.json().get('team', {}).get('name')}")
 
@@ -94,12 +87,9 @@ def check_team_access(team_id: str):
 def fetch_folders(space_id: str):
     base = f"https://api.clickup.com/api/v2/space/{space_id}/folder"
     params = {"archived": "false"}
-    logging.info(f"Fetching folders from {base}")
     r = cu.get(base, params=params)
-    logging.info(f"Folders response: status {r.status_code}, body: {r.text[:500]}...")
     while _rate_limit_sleep(r):
         r = cu.get(base, params=params)
-        logging.info(f"Retry folders: status {r.status_code}, body: {r.text[:500]}...")
     r.raise_for_status()
     return r.json().get("folders", [])
 
@@ -107,12 +97,9 @@ def fetch_folders(space_id: str):
 def fetch_lists_from_folder(folder_id: str):
     base = f"https://api.clickup.com/api/v2/folder/{folder_id}/list"
     params = {"archived": "false"}
-    logging.info(f"Fetching lists from folder {folder_id}")
     r = cu.get(base, params=params)
-    logging.info(f"Lists response: status {r.status_code}, body: {r.text[:500]}...")
     while _rate_limit_sleep(r):
         r = cu.get(base, params=params)
-        logging.info(f"Retry lists: status {r.status_code}, body: {r.text[:500]}...")
     r.raise_for_status()
     return r.json().get("lists", [])
 
@@ -120,12 +107,9 @@ def fetch_lists_from_folder(folder_id: str):
 def fetch_folderless_lists(space_id: str):
     base = f"https://api.clickup.com/api/v2/space/{space_id}/list"
     params = {"archived": "false"}
-    logging.info(f"Fetching folderless lists from {base}")
     r = cu.get(base, params=params)
-    logging.info(f"Folderless lists response: status {r.status_code}, body: {r.text[:500]}...")
     while _rate_limit_sleep(r):
         r = cu.get(base, params=params)
-        logging.info(f"Retry folderless lists: status {r.status_code}, body: {r.text[:500]}...")
     r.raise_for_status()
     return r.json().get("lists", [])
 
@@ -149,19 +133,16 @@ def fetch_tasks_from_list(list_id: str, updated_after: datetime):
             params["updated_gt"] = updated_gt
         if CLICKUP_ONLY_OPEN:
             params["statuses[]"] = ["to do", "in progress"]
-        logging.info(f"Fetching tasks from list {list_id}, page {page}")
         r = cu.get(base, params=params)
-        logging.info(f"Tasks response: status {r.status_code}, body: {r.text[:500]}...")
         while _rate_limit_sleep(r):
             r = cu.get(base, params=params)
-            logging.info(f"Retry tasks: status {r.status_code}, body: {r.text[:500]}...")
         r.raise_for_status()
         batch = r.json().get("tasks", [])
         if not batch:
             break
         for t in batch:
             desc = t.get('markdown_description') or t.get('description') or ""
-            t['description'] = desc  # Fallback
+            t['description'] = desc
             yield t
         page += 1
 
@@ -183,7 +164,7 @@ def fetch_clickup_tasks(updated_after: datetime, space_id: str):
         list_id = lst.get("id")
         if list_id in IGNORED_LIST_IDS:
             logging.info(f"Skipping ignored list: {lst.get('name')} (ID: {list_id})")
-            continue
+                continue
         for task in fetch_tasks_from_list(list_id, updated_after):
             yield task
 
@@ -196,24 +177,22 @@ def task_to_html(task: dict) -> str:
         body_html = body_html[:50000] + "<p><em>Описание урезано из-за длины</em></p>"
     return f"<h1>{html.escape(name)}</h1>{body_html}"
 
-# ==== Intercom: Поиск существующей статьи по title (с улучшенным поиском) ====
+# ==== Intercom: Поиск существующей статьи по title ====
 def find_existing_article(title: str, task_id: str):
     unique_title = f"{title} [{task_id}]".strip()
     url = f"{INTERCOM_BASE}/internal_articles"
     while url:
         try:
             r = ic.get(url)
-            logging.info(f"List response for finding '{unique_title}': status {r.status_code}, body: {r.text[:500]}...")
             while _rate_limit_sleep(r):
                 r = ic.get(url)
-                logging.info(f"Retry list: status {r.status_code}, body: {r.text[:500]}...")
             r.raise_for_status()
             data = r.json()
             articles = data.get("data", [])
             for article in articles:
                 art_title = article.get("title", "").strip()
                 if art_title == unique_title:
-                    logging.info(f"Found existing article for '{title}': ID {article.get('id')}")
+                    logging.info(f"Found existing article: {unique_title} (ID: {article.get('id')})")
                     return article
             url = data.get("pages", {}).get("next")
         except Exception as e:
@@ -225,7 +204,7 @@ def find_existing_article(title: str, task_id: str):
 def create_internal_article(task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
-    title = f"{task.get('name') or '(Без названия)'} [{task_id}]"  # Уникальный title с ID
+    title = f"{task.get('name') or '(Без названия)'} [{task_id}]"
     try:
         html_body = task_to_html(task)
         if len(html_body) > 50000:
@@ -242,10 +221,8 @@ def create_internal_article(task: dict):
             return None
         logging.info(f"Creating new: {title}")
         r = ic.post(endpoint, json=payload)
-        logging.info(f"Create response: status {r.status_code}, body: {r.text[:500]}...")
         while _rate_limit_sleep(r):
             r = ic.post(endpoint, json=payload)
-            logging.info(f"Retry create: status {r.status_code}, body: {r.text[:500]}...")
         if r.status_code in (200, 201):
             result = r.json()
             logging.info(f"✅ Created: {title} (ID: {result.get('id')})")
@@ -257,7 +234,7 @@ def create_internal_article(task: dict):
         logging.error(f"❌ Create error for {task_id}: {e}")
         return None
 
-# ==== Intercom: upsert (только создание новых, с уникальностью) ====
+# ==== Intercom: upsert (только создание новых) ====
 def upsert_internal_article(task: dict):
     task_id = task.get("id")
     original_title = task.get("name") or "(Без названия)"
@@ -267,13 +244,12 @@ def upsert_internal_article(task: dict):
     else:
         create_internal_article(task)
 
-# ==== Функция для очистки дублей (запустить ОДИН РАЗ вручную) ====
+# ==== Функция для очистки дублей ====
 def cleanup_duplicates():
-    """Удаляет дубликаты по title, оставляя только первый (самый старый)."""
     if DRY_RUN:
         logging.info("[DRY_RUN] Would cleanup duplicates")
         return
-    logging.info("🔄 Starting duplicate cleanup...")
+    logging.info("Starting duplicate cleanup...")
     articles = []
     url = f"{INTERCOM_BASE}/internal_articles"
     while url:
@@ -296,14 +272,13 @@ def cleanup_duplicates():
     deleted = 0
     for base_title, ids in title_to_ids.items():
         if len(ids) > 1:
-            # Оставляем самый старый (минимальный ID, предполагая числовые ID)
             to_keep = min(ids, key=int)
             to_delete = [i for i in ids if i != to_keep]
             for del_id in to_delete:
                 delete_endpoint = f"{INTERCOM_BASE}/internal_articles/{del_id}"
                 dr = ic.delete(delete_endpoint)
                 if dr.status_code in (200, 204):
-                    logging.info(f"🗑️ Deleted duplicate: {base_title} (ID: {del_id})")
+                    logging.info(f"Deleted duplicate: {base_title} (ID: {del_id})")
                     deleted += 1
                 else:
                     logging.error(f"Failed to delete {del_id}: {dr.status_code}")
@@ -311,7 +286,6 @@ def cleanup_duplicates():
 
 # ==== Главный процесс ====
 def main():
-    # Если CLEANUP_DUPLICATES=true в env, запусти очистку
     if os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true":
         cleanup_duplicates()
         return
@@ -324,16 +298,14 @@ def main():
         updated_after = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     logging.info(f"Syncing tasks after {updated_after.isoformat()} from space {SPACE_ID}")
     
-    # Проверка доступа к team
     try:
         check_team_access(CLICKUP_TEAM_ID)
     except Exception as e:
         logging.error(f"Team access check failed: {e}")
-        return  # Прерываем, если нет доступа
+        return
     
     count = 0
     skipped = 0
-    processed = 0  # Счетчик для тестового лимита
     try:
         for task in fetch_clickup_tasks(updated_after, SPACE_ID):
             try:
@@ -345,10 +317,6 @@ def main():
                     count += 1
             except Exception as e:
                 logging.exception(f"Failed task {task.get('id')}: {e}")
-            processed += 1
-            if processed >= TEST_LIMIT:
-                logging.info(f"Тестовый режим: Остановлено после обработки {TEST_LIMIT} задач")
-                break
     except Exception as e:
         logging.exception(f"Fetch error: {e}")
     now_iso = datetime.now(timezone.utc).isoformat()
