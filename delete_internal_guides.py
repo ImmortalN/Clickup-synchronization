@@ -8,7 +8,7 @@ load_dotenv()
 
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
-INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")
+INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "2.14")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -23,19 +23,20 @@ ic.headers.update({
 })
 
 # ==== Получение всех internal articles ====
-def fetch_all_articles(query: str = ""):
+def fetch_all_articles():
     articles = []
-    page = 1
-    while True:
-        params = {"query": query, "page": page}
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles/search", params=params)
+    url = f"{INTERCOM_BASE}/internal_articles"
+    while url:
+        logging.info(f"Fetching articles from {url}")
+        r = ic.get(url)
         r.raise_for_status()
         data = r.json()
-        batch = data.get("articles", []) or data.get("data", {}).get("internal_articles", [])
+        batch = data.get("data", [])
         if not batch:
             break
         articles.extend(batch)
-        page += 1
+        pages = data.get("pages", {})
+        url = pages.get("next")
     return articles
 
 # ==== Удаление статьи ====
