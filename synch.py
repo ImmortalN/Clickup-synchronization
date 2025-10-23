@@ -24,9 +24,11 @@ INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 SYNC_STATE_FILE = os.getenv("SYNC_STATE_FILE", ".sync_state.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
+DELETE_MODE = os.getenv("DELETE_MODE", "false").lower() == "true"  # Режим удаления
+CLEANUP_DUPLICATES = os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true"  # Очистка дублей
 SPACE_ID = "90125205902"  # Правильный ID пространства
 
-IGNORED_LIST_IDS = ["8cjzjmb-34452", "8cjzjmb-30872"]  # FORM и Changelog
+IGNORED_LIST_IDS = ["901212791461", "901212763746"]  # FORM и Changelog (обновлённые ID)
 
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
@@ -127,10 +129,11 @@ def fetch_folderless_lists(space_id: str):
     return r.json().get("lists", [])
 
 # ==== ClickUp: Получение задач из списка ====
-def fetch_tasks_from_list(list_id: str, updated_after: datetime):
+def fetch_tasks_from_list(list_id: str, updated_after: datetime = None):
     base = f"https://api.clickup.com/api/v2/list/{list_id}/task"
     page = 0
-    updated_gt = int(updated_after.timestamp() * 1000) if not FETCH_ALL else None
+    updated_gt = int(updated_after.timestamp() * 1000) if updated_after and not FETCH_ALL else None
+    tasks = []
     while True:
         params = {
             "page": page,
@@ -159,8 +162,9 @@ def fetch_tasks_from_list(list_id: str, updated_after: datetime):
         for t in batch:
             desc = t.get('markdown_description') or t.get('description') or ""
             t['description'] = desc  # Fallback
-            yield t
+            tasks.append(t)
         page += 1
+    return tasks
 
 # ==== Главная функция для получения всех задач ====
 def fetch_clickup_tasks(updated_after: datetime, space_id: str):
@@ -193,9 +197,8 @@ def task_to_html(task: dict) -> str:
         body_html = body_html[:50000] + "<p><em>Описание урезано из-за длины</em></p>"
     return f"<h1>{html.escape(name)}</h1>{body_html}"
 
-# ==== Intercom: Поиск существующей статьи по title (с улучшенным поиском) ====
+# ==== Intercom: Поиск существующей статьи по title (оригинальный + с [task_id]) ====
 def find_existing_article(title: str, task_id: str):
-    # Ищем по оригинальному title + с [ID] для уникальности
     search_queries = [title, f"{title} [{task_id}]"]
     endpoint = f"{INTERCOM_BASE}/internal_articles/search"
     for query in search_queries:
@@ -208,9 +211,9 @@ def find_existing_article(title: str, task_id: str):
                 logging.info(f"Retry search: status {r.status_code}, body: {r.text[:500]}...")
             r.raise_for_status()
             data = r.json()
-            articles = data.get("articles", []) or data.get("data", {}).get("internal_articles", [])
+            articles = data.get("articles", [])
             if articles:
-                logging.info(f"Found existing article for '{title}' via query '{query}': ID {articles[0]['id']}")
+                logging.info(f"Found article for '{title}' via '{query}': ID {articles[0]['id']}")
                 return articles[0]
         except Exception as e:
             logging.error(f"Search error for '{query}': {e}")
@@ -221,7 +224,7 @@ def find_existing_article(title: str, task_id: str):
 def create_internal_article(task: dict):
     task_id = task.get("id")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
-    title = f"{task.get('name') or '(Без названия)'} [{task_id}]"  # Уникальный title с ID
+    title = f"{task.get('name') or '(Без названия)'} [{task_id}]"  # Уникальный title
     try:
         html_body = task_to_html(task)
         if len(html_body) > 50000:
@@ -236,7 +239,7 @@ def create_internal_article(task: dict):
         if DRY_RUN:
             logging.info(f"[DRY_RUN] Would create: {title}")
             return None
-        logging.info(f"Creating new: {title}")
+        logging.info(f"Creating: {title}")
         r = ic.post(endpoint, json=payload)
         logging.info(f"Create response: status {r.status_code}, body: {r.text[:500]}...")
         while _rate_limit_sleep(r):
@@ -244,69 +247,89 @@ def create_internal_article(task: dict):
             logging.info(f"Retry create: status {r.status_code}, body: {r.text[:500]}...")
         if r.status_code in (200, 201):
             result = r.json()
-            logging.info(f"✅ Created: {title} (ID: {result.get('id')})")
+            logging.info(f"Created: {title} (ID: {result.get('id')})")
             return result.get('id')
         else:
-            logging.error(f"❌ Create failed: {r.status_code} {r.text}")
+            logging.error(f"Create failed: {r.status_code} {r.text}")
             return None
     except Exception as e:
-        logging.error(f"❌ Create error for {task_id}: {e}")
+        logging.error(f"Create error for {task_id}: {e}")
         return None
-
-# ==== Intercom: Обновление статьи (если нужно; сейчас закомментировано для "только новых") ====
-# def update_internal_article(article_id: str, task: dict):
-#     # ... (код обновления, если раскомментируешь)
 
 # ==== Intercom: upsert (только создание новых, с уникальностью) ====
 def upsert_internal_article(task: dict):
     task_id = task.get("id")
-    original_title = task.get("name") or "(Без названия)"
-    existing_article = find_existing_article(original_title, task_id)
+    title = task.get("name") or "(Без названия)"
+    existing_article = find_existing_article(title, task_id)
     if existing_article:
-        logging.info(f"⏭️ Skipping existing: {original_title} (Intercom ID: {existing_article['id']}, Task ID: {task_id})")
+        logging.info(f"Skipping existing: {title} (ID: {existing_article['id']})")
     else:
         create_internal_article(task)
 
-# ==== Функция для очистки дублей (запустить ОДИН РАЗ вручную) ====
+# ==== Функция удаления гайдов из ignored lists ====
+def delete_guides_from_ignored_lists():
+    logging.info("Starting deletion from ignored lists")
+    deleted_count = 0
+    for list_id in IGNORED_LIST_IDS:
+        tasks = fetch_tasks_from_list(list_id)
+        for task in tasks:
+            title = task.get("name") or "(Без названия)"
+            task_id = task.get("id")
+            existing_article = find_existing_article(title, task_id)
+            if existing_article:
+                endpoint = f"{INTERCOM_BASE}/internal_articles/{existing_article['id']}"
+                if DRY_RUN:
+                    logging.info(f"[DRY_RUN] Would delete: {title} (ID: {existing_article['id']})")
+                    continue
+                r = ic.delete(endpoint)
+                if r.status_code in (200, 204):
+                    logging.info(f"Deleted: {title} (ID: {existing_article['id']})")
+                    deleted_count += 1
+                else:
+                    logging.error(f"Delete failed for {title}: {r.status_code} {r.text}")
+            else:
+                logging.info(f"No guide found for {title} (task {task_id})")
+    logging.info(f"Deletion done: Deleted {deleted_count} guides")
+
+# ==== Функция очистки дублей ====
 def cleanup_duplicates():
-    """Удаляет дубликаты по title, оставляя только первый (самый старый)."""
-    if DRY_RUN:
-        logging.info("[DRY_RUN] Would cleanup duplicates")
-        return
-    logging.info("🔄 Starting duplicate cleanup...")
+    logging.info("Starting duplicate cleanup")
     endpoint = f"{INTERCOM_BASE}/internal_articles"
     r = ic.get(endpoint)
     r.raise_for_status()
     articles = r.json().get("articles", [])
     title_to_ids = {}
     for article in articles:
-        title = article.get("title", "").rstrip(" []")  # Убираем [ID] для матчинга
-        if title not in title_to_ids:
-            title_to_ids[title] = []
-        title_to_ids[title].append(article["id"])
-    
+        clean_title = article.get("title").rsplit('[', 1)[0].strip() if '[' in article.get("title") else article.get("title")
+        if clean_title not in title_to_ids:
+            title_to_ids[clean_title] = []
+        title_to_ids[clean_title].append(article["id"])
     deleted = 0
     for title, ids in title_to_ids.items():
         if len(ids) > 1:
-            # Оставляем первый (самый старый, по ID)
-            to_delete = ids[1:]  # Все кроме первого
+            to_delete = ids[1:]  # Оставляем первый
             for del_id in to_delete:
-                delete_endpoint = f"{INTERCOM_BASE}/internal_articles/{del_id}"
-                dr = ic.delete(delete_endpoint)
-                if dr.status_code in (200, 204):
-                    logging.info(f"🗑️ Deleted duplicate: {title} (ID: {del_id})")
+                endpoint = f"{INTERCOM_BASE}/internal_articles/{del_id}"
+                if DRY_RUN:
+                    logging.info(f"[DRY_RUN] Would delete duplicate: {title} (ID: {del_id})")
+                    continue
+                r = ic.delete(endpoint)
+                if r.status_code in (200, 204):
+                    logging.info(f"Deleted duplicate: {title} (ID: {del_id})")
                     deleted += 1
                 else:
-                    logging.error(f"Failed to delete {del_id}: {dr.status_code}")
+                    logging.error(f"Delete failed for duplicate {title}: {r.status_code} {r.text}")
     logging.info(f"Cleanup done: Deleted {deleted} duplicates")
 
 # ==== Главный процесс ====
 def main():
-    # Если CLEANUP_DUPLICATES=true в env, запусти очистку
-    if os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true":
+    if DELETE_MODE:
+        delete_guides_from_ignored_lists()
+        return
+    if CLEANUP_DUPLICATES:
         cleanup_duplicates()
         return
-    
+
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
     if last_sync_iso and not FETCH_ALL:
@@ -315,24 +338,18 @@ def main():
         updated_after = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     logging.info(f"Syncing tasks after {updated_after.isoformat()} from space {SPACE_ID}")
     
-    # Проверка доступа к team
     try:
         check_team_access(CLICKUP_TEAM_ID)
     except Exception as e:
         logging.error(f"Team access check failed: {e}")
-        return  # Прерываем, если нет доступа
+        return
     
     count = 0
-    skipped = 0
     try:
         for task in fetch_clickup_tasks(updated_after, SPACE_ID):
             try:
-                existing = find_existing_article(task.get("name") or "", task.get("id"))
-                if existing:
-                    skipped += 1
-                else:
-                    create_internal_article(task)
-                    count += 1
+                upsert_internal_article(task)
+                count += 1
             except Exception as e:
                 logging.exception(f"Failed task {task.get('id')}: {e}")
     except Exception as e:
@@ -340,7 +357,7 @@ def main():
     now_iso = datetime.now(timezone.utc).isoformat()
     state["last_sync_iso"] = now_iso
     _save_state(state)
-    logging.info(f"Done. Created {count} new, skipped {skipped} existing. Last sync: {now_iso}")
+    logging.info(f"Done. Synced {count} items. Last sync: {now_iso}")
 
 if __name__ == "__main__":
     main()
