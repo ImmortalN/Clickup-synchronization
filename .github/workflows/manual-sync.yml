@@ -33,6 +33,7 @@ jobs:
         INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
         INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
         SYNC_STATE_FILE: '.sync_state.json'
+        DELETE_MODE: 'true'  # Для первой очистки
         DRY_RUN: 'false'
         FETCH_ALL: 'true'  # Полная проверка для одноразового запуска
       run: python synch.py
