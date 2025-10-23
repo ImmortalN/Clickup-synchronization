@@ -28,9 +28,6 @@ SPACE_ID = "90125205902"  # Правильный ID пространства
 
 IGNORED_LIST_IDS = ["8cjzjmb-34452", "8cjzjmb-30872"]  # FORM и Changelog
 
-# Тестовый режим: Ограничение на количество задач для обработки (для теста 5 гайдов)
-TEST_LIMIT = 5  # Обрабатываем только первые 5 задач из ClickUp для теста
-
 # ==== Проверка обязательных переменных ====
 assert CLICKUP_TOKEN, "CLICKUP_API_TOKEN is required"
 assert CLICKUP_TEAM_ID, "CLICKUP_TEAM_ID is required"
@@ -256,6 +253,10 @@ def create_internal_article(task: dict):
         logging.error(f"❌ Create error for {task_id}: {e}")
         return None
 
+# ==== Intercom: Обновление статьи (если нужно; сейчас закомментировано для "только новых") ====
+# def update_internal_article(article_id: str, task: dict):
+#     # ... (код обновления, если раскомментируешь)
+
 # ==== Intercom: upsert (только создание новых, с уникальностью) ====
 def upsert_internal_article(task: dict):
     task_id = task.get("id")
@@ -323,7 +324,6 @@ def main():
     
     count = 0
     skipped = 0
-    processed = 0  # Счетчик для тестового лимита
     try:
         for task in fetch_clickup_tasks(updated_after, SPACE_ID):
             try:
@@ -335,10 +335,6 @@ def main():
                     count += 1
             except Exception as e:
                 logging.exception(f"Failed task {task.get('id')}: {e}")
-            processed += 1
-            if processed >= TEST_LIMIT:
-                logging.info(f"Тестовый режим: Остановлено после обработки {TEST_LIMIT} задач")
-                break
     except Exception as e:
         logging.exception(f"Fetch error: {e}")
     now_iso = datetime.now(timezone.utc).isoformat()
