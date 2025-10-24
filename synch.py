@@ -214,7 +214,7 @@ def create_internal_article(task: dict):
             "body": html_body,
             "owner_id": INTERCOM_OWNER_ID,
             "author_id": INTERCOM_AUTHOR_ID,
-            "locale": "ru",
+            "locale": "en",
         }
         if DRY_RUN:
             logging.info(f"[DRY_RUN] Would create: {title}")
