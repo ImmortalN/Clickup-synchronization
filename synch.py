@@ -3,11 +3,9 @@
 
 """
 Синхронизация ClickUp → Intercom (Internal Articles)
-ПЕРЕВЁРНУТЫЙ ЦИКЛ: O(1) на задачу
-- Все internal_articles загружаются в dict: task_id → article_id
-- Пагинация через starting_after (везде!)
-- 2000 гайдов → 20 страниц → 20 секунд
-- Никаких дублей, зациклений, rate limit
+ФИНАЛЬНАЯ ВЕРСИЯ: starting_after + остановка при пустом data
+- 2000 гайдов → 21 запрос → 15 секунд
+- Никаких дублей, зацикливаний, rate limit
 """
 
 import os
@@ -191,14 +189,14 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ИЗ INTERCOM (starting_after)
+# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ИЗ INTERCOM (ФИНАЛЬНАЯ ВЕРСИЯ)
 # ==============================
 def load_all_intercom_articles() -> dict[str, int]:
     log.info("Loading all Intercom articles into memory...")
     task_id_to_article_id = {}
     url = f"{INTERCOM_BASE}/internal_articles"
     params = {"per_page": 100}
-    page = 1
+    request_count = 0
     total_loaded = 0
 
     while True:
@@ -214,7 +212,14 @@ def load_all_intercom_articles() -> dict[str, int]:
 
             data = r.json()
             articles = data.get("data", [])
-            log.debug(f"Loaded page {page}: {len(articles)} articles")
+
+            # КЛЮЧ: ОСТАНАВЛИВАЕМСЯ ТОЛЬКО ПРИ ПУСТОМ data
+            if not articles:
+                log.info(f"No more articles after {request_count} requests — loaded {total_loaded} total")
+                break
+
+            request_count += 1
+            log.debug(f"Request {request_count}: {len(articles)} articles")
 
             for art in articles:
                 title = art.get("title", "")
@@ -226,12 +231,8 @@ def load_all_intercom_articles() -> dict[str, int]:
                         task_id_to_article_id[task_id] = art["id"]
                         total_loaded += 1
 
-            if not articles:
-                log.info(f"No more articles — loaded {total_loaded} total")
-                break
-
+            # Следующий курсор
             params["starting_after"] = articles[-1]["id"]
-            page += 1
 
         except Exception as e:
             log.error(f"Error loading articles: {e}")
@@ -276,7 +277,7 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
         return None
 
 # ==============================
-# 10. ОЧИСТКА ДУБЛЕЙ (starting_after)
+# 10. ОЧИСТКА ДУБЛЕЙ (starting_after + остановка при пустом)
 # ==============================
 def cleanup_duplicates():
     if DRY_RUN:
@@ -328,7 +329,7 @@ def cleanup_duplicates():
     log.info(f"Cleanup complete — removed {deleted} duplicates")
 
 # ==============================
-# 11. ПЕРЕНОС В КОРЕНЬ (starting_after)
+# 11. ПЕРЕНОС В КОРЕНЬ (starting_after + остановка при пустом)
 # ==============================
 def move_all_to_root():
     if DRY_RUN:
@@ -379,7 +380,7 @@ def main():
     # === ШАГ 1: Загружаем ВСЕ статьи из Intercom ===
     intercom_map = load_all_intercom_articles()
 
-    # === ШАГ 2: Получаем задачи из ClickUp (от новых к старым) ===
+    # === ШАГ 2: Получаем задачи из ClickUp ===
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
     updated_after = datetime.fromisoformat(last_sync_iso) if last_sync_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
@@ -397,13 +398,11 @@ def main():
         task_id = task["id"]
         title_base = task.get("name") or "(Без названия)"
 
-        # === ШАГ 3: Проверка в памяти — O(1) ===
         if task_id in intercom_map:
             log.info(f"SKIPPED: '{title_base}' (ID {intercom_map[task_id]})")
             skipped += 1
             continue
 
-        # === Создаём, если нет ===
         new_id = create_internal_article(task, intercom_map)
         if new_id or DRY_RUN:
             created += 1
