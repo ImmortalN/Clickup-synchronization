@@ -3,11 +3,11 @@
 
 """
 Синхронизация ClickUp → Intercom (Internal Articles)
-- Ищет существующие гайды по [task_id] в title
-- Проходит пагинацию только до нахождения
-- НЕ создаёт дубли
+- Поиск по [task_id] в title
+- Пагинация: per_page=100 + pages.next
 - DRY_RUN, DEBUG_SEARCH, CLEANUP_DUPLICATES
-- Без папки — проверяй вручную
+- Статьи создаются БЕЗ папки (в корне)
+- Никаких дублей
 """
 
 import os
@@ -44,10 +44,11 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
 CLEANUP_DUPLICATES = os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true"
 DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
+MOVE_TO_ROOT = os.getenv("MOVE_TO_ROOT", "false").lower() == "true"
 
 # --- Данные ---
 SPACE_ID = "90125205902"
-IGNORED_LIST_IDS = {"901212791461", "901212763746"}  # FORM и Changelog
+IGNORED_LIST_IDS = {"901212791461", "901212763746"}
 SYNC_STATE_FILE = ".sync_state.json"
 
 # ==============================
@@ -66,7 +67,6 @@ if missing:
     print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
     raise SystemExit(1)
 
-# Приводим ID к int
 try:
     INTERCOM_OWNER_ID = int(INTERCOM_OWNER_ID)
     INTERCOM_AUTHOR_ID = int(INTERCOM_AUTHOR_ID)
@@ -195,20 +195,16 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. INTERCOM: ПОИСК ПО task_id (умная пагинация)
+# 8. INTERCOM: ПОИСК ПО task_id (per_page=100 + pages.next)
 # ==============================
 def find_existing_by_task_id(task_id: str):
-    """
-    Ищет статью по [task_id] в title.
-    Проходит страницы только до нахождения.
-    """
     marker = f"[{task_id}]"
     log.debug(f"Searching for task_id: {marker}")
 
     url = f"{INTERCOM_BASE}/internal_articles"
-    params = {"per_page": 100}
+    params = {"per_page": 100}  # ФИКС: 100 — работает с pages.next
     page = 1
-    max_pages = 200  # Защита
+    max_pages = 200
 
     while url and page <= max_pages:
         try:
@@ -223,17 +219,21 @@ def find_existing_by_task_id(task_id: str):
                 break
 
             data = r.json()
+            pages_info = data.get("pages", {})
+            log.debug(f"Page {page} — pages: {pages_info}")
+
             articles = data.get("data", [])
             log.debug(f"Page {page}: {len(articles)} articles")
 
             for art in articles:
-                if marker in art.get("title", ""):
-                    log.info(f"FOUND: '{art.get('title')}' (ID: {art['id']}) on page {page}")
+                title = art.get("title", "")
+                if marker in title:
+                    log.info(f"FOUND: '{title}' (ID: {art['id']}) on page {page}")
                     return art
 
-            next_url = data.get("pages", {}).get("next")
+            next_url = pages_info.get("next")
             if not next_url:
-                log.debug(f"No more pages after {page}")
+                log.debug(f"No next page after {page} — end of results")
                 break
 
             url = next_url
@@ -247,7 +247,7 @@ def find_existing_by_task_id(task_id: str):
     return None
 
 # ==============================
-# 9. СОЗДАНИЕ
+# 9. СОЗДАНИЕ (БЕЗ ПАПКИ)
 # ==============================
 def create_internal_article(task: dict):
     task_id = task["id"]
@@ -261,6 +261,7 @@ def create_internal_article(task: dict):
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
         "locale": "en",
+        # БЕЗ parent_id → в корне
     }
 
     if DRY_RUN:
@@ -338,11 +339,36 @@ def cleanup_duplicates():
     log.info(f"Cleanup complete — removed {deleted} duplicates")
 
 # ==============================
-# 12. MAIN
+# 12. ПЕРЕНОС В КОРЕНЬ
+# ==============================
+def move_all_to_root():
+    if DRY_RUN:
+        log.info("[DRY_RUN] Would move all to root")
+        return
+
+    log.info("Moving all articles to root...")
+    url = f"{INTERCOM_BASE}/internal_articles?per_page=100"
+    while url:
+        r = ic.get(url)
+        r.raise_for_status()
+        data = r.json()
+        for art in data.get("data", []):
+            if art.get("parent_id"):
+                put_r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art['id']}", json={"parent_id": None})
+                if put_r.status_code == 200:
+                    log.info(f"Moved to root: {art['title']} (ID: {art['id']})")
+        url = data.get("pages", {}).get("next")
+    log.info("All articles moved to root")
+
+# ==============================
+# 13. MAIN
 # ==============================
 def main():
     if CLEANUP_DUPLICATES:
         cleanup_duplicates()
+        return
+    if MOVE_TO_ROOT:
+        move_all_to_root()
         return
 
     state = _load_state()
