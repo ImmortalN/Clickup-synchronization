@@ -42,9 +42,17 @@ IGNORED_LIST_IDS = {"901212791461", "901212763746"}  # FORM и Changelog
 SYNC_STATE_FILE = ".sync_state.json"
 
 # --- Проверка ---
-required = [CLICKUP_TOKEN, CLICKUP_TEAM_ID, INTERCOM_TOKEN, INTERCOM_OWNER_ID, INTERCOM_AUTHOR_ID]
-missing = [name for name, val in locals().items() if name in [v.split("=")[0] for v in required] and not val]
-assert not missing, f"Missing env vars: {', '.join(missing)}"
+required_vars = [
+    "CLICKUP_API_TOKEN",
+    "CLICKUP_TEAM_ID",
+    "INTERCOM_ACCESS_TOKEN",
+    "INTERCOM_OWNER_ID",
+    "INTERCOM_AUTHOR_ID"
+]
+missing = [var for var in required_vars if os.getenv(var) is None]
+if missing:
+    log.error(f"Missing required environment variables: {', '.join(missing)}")
+    raise SystemExit(1)
 
 # ==============================
 # 2. ЛОГИРОВАНИЕ
