@@ -1,41 +1,39 @@
 name: Manual ClickUp Sync
-
 on:
-  workflow_dispatch:  # Только ручной запуск, без schedule/push
+  workflow_dispatch:  # Ручной запуск
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install requests python-dotenv markdown
-    
-    - name: Run sync script
-      env:
-        CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
-        CLICKUP_TEAM_ID: ${{ secrets.CLICKUP_TEAM_ID }}
-        CLICKUP_ONLY_OPEN: 'false'  # Или true, если только открытые
-        CLICKUP_UPDATED_LOOKBACK_HOURS: '24'
-        INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
-        INTERCOM_REGION: 'https://api.intercom.io'
-        INTERCOM_VERSION: 'Unstable'
-        INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
-        INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
-        SYNC_STATE_FILE: '.sync_state.json'
-        DELETE_MODE: 'true'  # Для первой очистки
-        CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
-        DRY_RUN: true
-        DEBUG_SEARCH: true
-        FETCH_ALL: false
-      run: python synch.py
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4  # v4, не v5!
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv markdown
+
+      - name: Run sync script
+        env:
+          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+          CLICKUP_TEAM_ID: ${{ secrets.CLICKUP_TEAM_ID }}
+          INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
+          INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
+          INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
+          INTERCOM_REGION: 'https://api.intercom.io'
+          INTERCOM_VERSION: 'Unstable'
+          CLICKUP_ONLY_OPEN: 'false'
+          CLICKUP_UPDATED_LOOKBACK_HOURS: '24'
+          DRY_RUN: true
+          DEBUG_SEARCH: true
+          FETCH_ALL: false
+          SYNC_STATE_FILE: '.sync_state.json'
+          # CLEANUP_DUPLICATES: true  # Если нужно удалить дубли
+        run: python synch.py
