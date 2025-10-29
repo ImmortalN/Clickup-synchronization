@@ -34,6 +34,8 @@ jobs:
         INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
         SYNC_STATE_FILE: '.sync_state.json'
         DELETE_MODE: 'true'  # Для первой очистки
-        DRY_RUN: 'false'
-        FETCH_ALL: 'true'  # Полная проверка для одноразового запуска
+        CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+        DRY_RUN: true
+        DEBUG_SEARCH: true
+        FETCH_ALL: false
       run: python synch.py
