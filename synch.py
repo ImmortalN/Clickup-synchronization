@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Синхронизация ClickUp → Intercom (Internal Articles)
+- Ищет существующие гайды по [task_id] в title
+- Проходит пагинацию только до нахождения
+- НЕ создаёт дубли
+- DRY_RUN, DEBUG_SEARCH, CLEANUP_DUPLICATES
+- Без папки — проверяй вручную
+"""
+
 import os
 import time
 import json
@@ -13,7 +22,7 @@ from markdown import markdown
 from dotenv import load_dotenv
 
 # ==============================
-# 1. КОНФИГУРАЦИЯ (из окружения)
+# 1. КОНФИГУРАЦИЯ
 # ==============================
 load_dotenv()
 
@@ -27,8 +36,8 @@ LOOKBACK_HOURS = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
 INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")
-INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID"))
-INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
+INTERCOM_OWNER_ID = os.getenv("INTERCOM_OWNER_ID")
+INTERCOM_AUTHOR_ID = os.getenv("INTERCOM_AUTHOR_ID")
 
 # --- Управление ---
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
@@ -41,7 +50,9 @@ SPACE_ID = "90125205902"
 IGNORED_LIST_IDS = {"901212791461", "901212763746"}  # FORM и Changelog
 SYNC_STATE_FILE = ".sync_state.json"
 
-# --- Проверка ---
+# ==============================
+# 2. ПРОВЕРКА ПЕРЕМЕННЫХ
+# ==============================
 required_vars = [
     "CLICKUP_API_TOKEN",
     "CLICKUP_TEAM_ID",
@@ -49,13 +60,22 @@ required_vars = [
     "INTERCOM_OWNER_ID",
     "INTERCOM_AUTHOR_ID"
 ]
+
 missing = [var for var in required_vars if os.getenv(var) is None]
 if missing:
-    log.error(f"Missing required environment variables: {', '.join(missing)}")
+    print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
+    raise SystemExit(1)
+
+# Приводим ID к int
+try:
+    INTERCOM_OWNER_ID = int(INTERCOM_OWNER_ID)
+    INTERCOM_AUTHOR_ID = int(INTERCOM_AUTHOR_ID)
+except ValueError:
+    print("ERROR: INTERCOM_OWNER_ID and INTERCOM_AUTHOR_ID must be integers")
     raise SystemExit(1)
 
 # ==============================
-# 2. ЛОГИРОВАНИЕ
+# 3. ЛОГИРОВАНИЕ
 # ==============================
 logging.basicConfig(
     level=logging.DEBUG if DEBUG_SEARCH else logging.INFO,
@@ -64,7 +84,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ==============================
-# 3. СЕССИИ
+# 4. СЕССИИ
 # ==============================
 cu = requests.Session()
 cu.headers.update({"Authorization": CLICKUP_TOKEN, "Content-Type": "application/json"})
@@ -80,7 +100,7 @@ ic.headers.update({
 ic.timeout = 15
 
 # ==============================
-# 4. УТИЛИТЫ
+# 5. УТИЛИТЫ
 # ==============================
 def _load_state() -> dict:
     if os.path.exists(SYNC_STATE_FILE):
@@ -101,11 +121,12 @@ def _rate_limit_sleep(resp: requests.Response) -> bool:
     return False
 
 # ==============================
-# 5. CLICKUP
+# 6. CLICKUP API
 # ==============================
 def check_team_access(team_id: str):
     r = cu.get(f"https://api.clickup.com/api/v2/team/{team_id}")
-    while _rate_limit_sleep(r): r = cu.get(f"https://api.clickup.com/api/v2/team/{team_id}")
+    while _rate_limit_sleep(r):
+        r = cu.get(f"https://api.clickup.com/api/v2/team/{team_id}")
     r.raise_for_status()
     log.info(f"Team access OK: {r.json()['team']['name']}")
 
@@ -163,7 +184,7 @@ def fetch_clickup_tasks(updated_after: datetime):
         yield from fetch_tasks_from_list(lst["id"], updated_after)
 
 # ==============================
-# 6. HTML
+# 7. HTML
 # ==============================
 def task_to_html(task: dict) -> str:
     name = task.get("name") or "(Без названия)"
@@ -174,53 +195,59 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 7. INTERCOM: НАДЁЖНЫЙ ПОИСК
+# 8. INTERCOM: ПОИСК ПО task_id (умная пагинация)
 # ==============================
-def find_existing_article(title: str, task_id: str):
-    unique_title = f"{title} [{task_id}]".strip()
-    log.debug(f"Searching Intercom for: '{unique_title}'")
+def find_existing_by_task_id(task_id: str):
+    """
+    Ищет статью по [task_id] в title.
+    Проходит страницы только до нахождения.
+    """
+    marker = f"[{task_id}]"
+    log.debug(f"Searching for task_id: {marker}")
 
     url = f"{INTERCOM_BASE}/internal_articles"
     params = {"per_page": 100}
     page = 1
-    scanned = 0
+    max_pages = 200  # Защита
 
-    while url:
+    while url and page <= max_pages:
         try:
-            r = ic.get(url, params=params if "page" not in url else None)
+            current_params = params if page == 1 else {}
+            r = ic.get(url, params=current_params)
             while _rate_limit_sleep(r):
-                r = ic.get(url, params=params if "page" not in url else None)
-            r.raise_for_status()
-            data = r.json()
+                time.sleep(2)
+                r = ic.get(url, params=current_params)
 
+            if r.status_code != 200:
+                log.error(f"HTTP {r.status_code} on page {page}")
+                break
+
+            data = r.json()
             articles = data.get("data", [])
-            scanned += len(articles)
-            log.debug(f"Page {page}: {len(articles)} articles (total scanned: {scanned})")
+            log.debug(f"Page {page}: {len(articles)} articles")
 
             for art in articles:
-                art_title = art.get("title", "").strip()
-                if art_title == unique_title:
-                    log.info(f"FOUND: '{unique_title}' (ID: {art['id']})")
+                if marker in art.get("title", ""):
+                    log.info(f"FOUND: '{art.get('title')}' (ID: {art['id']}) on page {page}")
                     return art
-                else:
-                    log.debug(f"  ≠ '{art_title}'")
 
             next_url = data.get("pages", {}).get("next")
+            if not next_url:
+                log.debug(f"No more pages after {page}")
+                break
+
             url = next_url
-            params = {}  # next_url уже содержит параметры
             page += 1
 
         except Exception as e:
-            log.error(f"Error fetching page {page}: {e}")
+            log.error(f"Error on page {page}: {e}")
             break
 
-    log.warning(f"NOT FOUND: '{unique_title}' after {page-1} pages ({scanned} articles)")
-    if DEBUG_SEARCH:
-        log.debug(f"Last URL: {url}")
+    log.warning(f"NOT FOUND: {marker} after {page-1} pages")
     return None
 
 # ==============================
-# 8. СОЗДАНИЕ
+# 9. СОЗДАНИЕ
 # ==============================
 def create_internal_article(task: dict):
     task_id = task["id"]
@@ -254,22 +281,25 @@ def create_internal_article(task: dict):
         return None
 
 # ==============================
-# 9. UPSERT
+# 10. UPSERT
 # ==============================
 def upsert_internal_article(task: dict) -> tuple[int, int]:
     task_id = task["id"]
     title_base = task.get("name") or "(Без названия)"
 
-    existing = find_existing_article(title_base, task_id)
+    existing = find_existing_by_task_id(task_id)
     if existing:
-        log.info(f"SKIPPED: '{title_base}' (exists as ID {existing['id']})")
+        log.info(f"SKIPPED: '{title_base}' (ID {existing['id']})")
         return 0, 1
 
-    create_internal_article(task)
+    new_id = create_internal_article(task)
+    if not new_id or DRY_RUN:
+        return 1 if new_id else 0, 0
+
     return 1, 0
 
 # ==============================
-# 10. ОЧИСТКА ДУБЛЕЙ
+# 11. ОЧИСТКА ДУБЛЕЙ
 # ==============================
 def cleanup_duplicates():
     if DRY_RUN:
@@ -308,7 +338,7 @@ def cleanup_duplicates():
     log.info(f"Cleanup complete — removed {deleted} duplicates")
 
 # ==============================
-# 11. MAIN
+# 12. MAIN
 # ==============================
 def main():
     if CLEANUP_DUPLICATES:
