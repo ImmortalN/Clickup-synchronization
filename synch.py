@@ -214,11 +214,13 @@ def find_existing_by_task_id(task_id: str):
             else:
                 r = ic.get(url)  # Без params
 
-            # === РЕТРАЙ ПРИ 429 — БЕЗ ПАРАМЕТРОВ ===
+            # === ФИКС: РЕТРАЙ ПРИ 429 — ТОЧНО ПОВТОРЯЕМ ОСНОВНОЙ ЗАПРОС ===
             while _rate_limit_sleep(r):
                 time.sleep(2)
-                # Повторяем тот же запрос, что и выше
-                r = ic.get(url, params=params if page == 1 else {})
+                if page == 1:
+                    r = ic.get(url, params=params)
+                else:
+                    r = ic.get(url)  # Без params
 
             if r.status_code != 200:
                 log.error(f"HTTP {r.status_code} on page {page}")
