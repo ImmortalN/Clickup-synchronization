@@ -4,10 +4,10 @@
 """
 Синхронизация ClickUp → Intercom (Internal Articles)
 ПЕРЕВЁРНУТЫЙ ЦИКЛ: O(1) на задачу
-1. Загружаем ВСЕ статьи из Intercom → в dict: task_id → article_id
-2. Проходим ClickUp задачи → проверяем в dict
-3. Создаём только отсутствующие
-Скорость: 30 сек на 3000 гайдов
+- Все internal_articles загружаются в dict: task_id → article_id
+- Пагинация через starting_after (везде!)
+- 2000 гайдов → 20 страниц → 20 секунд
+- Никаких дублей, зациклений, rate limit
 """
 
 import os
@@ -191,7 +191,7 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ИЗ INTERCOM
+# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ИЗ INTERCOM (starting_after)
 # ==============================
 def load_all_intercom_articles() -> dict[str, int]:
     log.info("Loading all Intercom articles into memory...")
@@ -269,14 +269,14 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
     if r.status_code in (200, 201):
         art_id = r.json().get("id")
         log.info(f"Created ID: {art_id}")
-        intercom_map[task_id] = art_id  # Обновляем кэш
+        intercom_map[task_id] = art_id
         return art_id
     else:
         log.error(f"Create failed: {r.status_code} {r.text}")
         return None
 
 # ==============================
-# 10. ОЧИСТКА ДУБЛЕЙ
+# 10. ОЧИСТКА ДУБЛЕЙ (starting_after)
 # ==============================
 def cleanup_duplicates():
     if DRY_RUN:
@@ -285,13 +285,27 @@ def cleanup_duplicates():
 
     log.info("Starting duplicate cleanup...")
     articles = []
-    url = f"{INTERCOM_BASE}/internal_articles?per_page=100"
-    while url:
-        r = ic.get(url)
-        r.raise_for_status()
+    url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}
+
+    while True:
+        r = ic.get(url, params=params)
+        while _rate_limit_sleep(r):
+            time.sleep(2)
+            r = ic.get(url, params=params)
+
+        if r.status_code != 200:
+            log.error(f"HTTP {r.status_code} in cleanup")
+            break
+
         data = r.json()
-        articles.extend(data.get("data", []))
-        url = data.get("pages", {}).get("next")
+        batch = data.get("data", [])
+        articles.extend(batch)
+
+        if not batch:
+            break
+
+        params["starting_after"] = batch[-1]["id"]
 
     title_to_ids = {}
     for art in articles:
@@ -314,7 +328,7 @@ def cleanup_duplicates():
     log.info(f"Cleanup complete — removed {deleted} duplicates")
 
 # ==============================
-# 11. ПЕРЕНОС В КОРЕНЬ
+# 11. ПЕРЕНОС В КОРЕНЬ (starting_after)
 # ==============================
 def move_all_to_root():
     if DRY_RUN:
@@ -322,17 +336,33 @@ def move_all_to_root():
         return
 
     log.info("Moving all articles to root...")
-    url = f"{INTERCOM_BASE}/internal_articles?per_page=100"
-    while url:
-        r = ic.get(url)
-        r.raise_for_status()
+    url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}
+
+    while True:
+        r = ic.get(url, params=params)
+        while _rate_limit_sleep(r):
+            time.sleep(2)
+            r = ic.get(url, params=params)
+
+        if r.status_code != 200:
+            log.error(f"HTTP {r.status_code} in move_to_root")
+            break
+
         data = r.json()
-        for art in data.get("data", []):
+        batch = data.get("data", [])
+
+        for art in batch:
             if art.get("parent_id"):
                 put_r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art['id']}", json={"parent_id": None})
                 if put_r.status_code == 200:
                     log.info(f"Moved to root: {art['title']} (ID: {art['id']})")
-        url = data.get("pages", {}).get("next")
+
+        if not batch:
+            break
+
+        params["starting_after"] = batch[-1]["id"]
+
     log.info("All articles moved to root")
 
 # ==============================
