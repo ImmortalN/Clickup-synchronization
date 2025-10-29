@@ -208,14 +208,16 @@ def find_existing_by_task_id(task_id: str):
 
     while url and page <= max_pages:
         try:
-            # ФИКС: params только на 1-й странице
+            # === ОСНОВНОЙ ЗАПРОС ===
             if page == 1:
                 r = ic.get(url, params=params)
             else:
                 r = ic.get(url)  # Без params
 
+            # === РЕТРАЙ ПРИ 429 — БЕЗ ПАРАМЕТРОВ ===
             while _rate_limit_sleep(r):
                 time.sleep(2)
+                # Повторяем тот же запрос, что и выше
                 r = ic.get(url, params=params if page == 1 else {})
 
             if r.status_code != 200:
