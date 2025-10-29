@@ -204,7 +204,7 @@ def find_existing_by_task_id(task_id: str):
     url = f"{INTERCOM_BASE}/internal_articles"
     params = {"per_page": 100}
     page = 1
-    max_pages = 200
+    max_pages = 500  # Защита от бесконечного цикла
 
     while page <= max_pages:
         try:
@@ -219,31 +219,24 @@ def find_existing_by_task_id(task_id: str):
                 break
 
             data = r.json()
-            pages_info = data.get("pages", {})
-            log.debug(f"Page {page} — pages: {pages_info}")
-
             articles = data.get("data", [])
             log.debug(f"Page {page}: {len(articles)} articles")
 
+            # === ПРОВЕРЯЕМ НАХОЖДЕНИЕ ===
             for art in articles:
                 title = art.get("title", "")
                 if marker in title:
                     log.info(f"FOUND: '{title}' (ID: {art['id']}) on page {page}")
                     return art
 
-            # === КЛЮЧ: ПРОВЕРКА total_pages ===
-            total_pages = pages_info.get("total_pages", 1)
-            if page >= total_pages:
-                log.debug(f"Reached last page {page} of {total_pages}")
+            # === КЛЮЧ: ОСТАНАВЛИВАЕМСЯ, КОГДА ПУСТО ===
+            if not articles:
+                log.debug(f"No more articles after page {page} — end of data")
                 break
 
-            # === КЛЮЧ: starting_after по ID последней статьи ===
-            if articles:
-                params["starting_after"] = articles[-1]["id"]
-                page += 1
-            else:
-                log.debug("No articles on this page — stopping")
-                break
+            # === ПЕРЕХОД К СЛЕДУЮЩЕЙ СТРАНИЦЕ ===
+            params["starting_after"] = articles[-1]["id"]
+            page += 1
 
         except Exception as e:
             log.error(f"Error on page {page}: {e}")
