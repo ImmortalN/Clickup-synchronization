@@ -195,24 +195,28 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. INTERCOM: ПОИСК ПО task_id (per_page=100 + pages.next)
+# 8. INTERCOM: ПОИСК ПО task_id (ФИКС ПАГИНАЦИИ)
 # ==============================
 def find_existing_by_task_id(task_id: str):
     marker = f"[{task_id}]"
     log.debug(f"Searching for task_id: {marker}")
 
     url = f"{INTERCOM_BASE}/internal_articles"
-    params = {"per_page": 100}  # ФИКС: 100 — работает с pages.next
+    params = {"per_page": 100}
     page = 1
     max_pages = 200
 
     while url and page <= max_pages:
         try:
-            current_params = params if page == 1 else {}
-            r = ic.get(url, params=current_params)
+            # ФИКС: params только на 1-й странице
+            if page == 1:
+                r = ic.get(url, params=params)
+            else:
+                r = ic.get(url)  # Без params
+
             while _rate_limit_sleep(r):
                 time.sleep(2)
-                r = ic.get(url, params=current_params)
+                r = ic.get(url, params=params if page == 1 else {})
 
             if r.status_code != 200:
                 log.error(f"HTTP {r.status_code} on page {page}")
@@ -233,7 +237,7 @@ def find_existing_by_task_id(task_id: str):
 
             next_url = pages_info.get("next")
             if not next_url:
-                log.debug(f"No next page after {page} — end of results")
+                log.debug(f"No next page after {page}")
                 break
 
             url = next_url
