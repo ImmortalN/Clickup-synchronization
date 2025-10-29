@@ -200,58 +200,53 @@ def task_to_html(task: dict) -> str:
 def find_existing_by_task_id(task_id: str):
     marker = f"[{task_id}]"
     log.debug(f"Searching for task_id: {marker}")
-
+    
     url = f"{INTERCOM_BASE}/internal_articles"
     params = {"per_page": 100}
     page = 1
     max_pages = 200
-
-    while url and page <= max_pages:
+    
+    while page <= max_pages:
         try:
-            # === ОСНОВНОЙ ЗАПРОС ===
-            if page == 1:
-                r = ic.get(url, params=params)
-            else:
-                r = ic.get(url)  # Без params
-
-            # === ФИКС: РЕТРАЙ ПРИ 429 — ТОЧНО ПОВТОРЯЕМ ОСНОВНОЙ ЗАПРОС ===
+            r = ic.get(url, params=params)
+            
             while _rate_limit_sleep(r):
                 time.sleep(2)
-                if page == 1:
-                    r = ic.get(url, params=params)
-                else:
-                    r = ic.get(url)  # Без params
-
+                r = ic.get(url, params=params)
+            
             if r.status_code != 200:
                 log.error(f"HTTP {r.status_code} on page {page}")
                 break
-
+            
             data = r.json()
             pages_info = data.get("pages", {})
             log.debug(f"Page {page} — pages: {pages_info}")
-
+            
             articles = data.get("data", [])
             log.debug(f"Page {page}: {len(articles)} articles")
-
+            
             for art in articles:
-                title = art.get("title", "")
-                if marker in title:
-                    log.info(f"FOUND: '{title}' (ID: {art['id']}) on page {page}")
+                if marker in art.get("title", ""):
+                    [log.info](https://log.info)(f"FOUND: '{art.get('title')}' (ID: {art['id']}) on page {page}")
                     return art
-
-            next_url = pages_info.get("next")
-            if not next_url:
-                log.debug(f"No next page after {page}")
+            
+            # Check if there are more pages
+            if page >= pages_info.get("total_pages", 1):
+                log.debug(f"Reached last page {page}")
                 break
-
-            url = next_url
-            page += 1
-
+            
+            # Get the last article ID for cursor
+            if articles:
+                params["starting_after"] = articles[-1]["id"]
+                page += 1
+            else:
+                break
+                
         except Exception as e:
             log.error(f"Error on page {page}: {e}")
             break
-
-    log.warning(f"NOT FOUND: {marker} after {page-1} pages")
+    
+    log.warning(f"NOT FOUND: {marker} after {page} pages")
     return None
 
 # ==============================
