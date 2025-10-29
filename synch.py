@@ -13,13 +13,8 @@ from markdown import markdown
 from dotenv import load_dotenv
 
 # ==============================
-# 1. ЗАГРУЗКА КОНФИГУРАЦИИ
+# 1. КОНФИГУРАЦИЯ (из окружения)
 # ==============================
-# ВАЖНО: Все переменные должны быть заданы в окружении!
-# - GitHub Actions: Settings → Secrets and variables → Actions
-# - GitLab CI: Settings → CI/CD → Variables
-# - Docker: --env-file или docker-compose.yml
-# - Локально: .env файл (только для разработки)
 load_dotenv()
 
 # --- ClickUp ---
@@ -35,48 +30,36 @@ INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID"))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 
-# --- Управление поведением ---
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"  # Только из env!
+# --- Управление ---
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
 CLEANUP_DUPLICATES = os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true"
+DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
 # --- Данные ---
 SPACE_ID = "90125205902"
 IGNORED_LIST_IDS = {"901212791461", "901212763746"}  # FORM и Changelog
 SYNC_STATE_FILE = ".sync_state.json"
 
-# --- Проверка обязательных переменных ---
+# --- Проверка ---
 required = [CLICKUP_TOKEN, CLICKUP_TEAM_ID, INTERCOM_TOKEN, INTERCOM_OWNER_ID, INTERCOM_AUTHOR_ID]
-missing = [name for name, val in [
-    ("CLICKUP_API_TOKEN", CLICKUP_TOKEN),
-    ("CLICKUP_TEAM_ID", CLICKUP_TEAM_ID),
-    ("INTERCOM_ACCESS_TOKEN", INTERCOM_TOKEN),
-    ("INTERCOM_OWNER_ID", INTERCOM_OWNER_ID),
-    ("INTERCOM_AUTHOR_ID", INTERCOM_AUTHOR_ID),
-] if not val]
-assert not missing, f"Missing required env vars: {', '.join(missing)}"
+missing = [name for name, val in locals().items() if name in [v.split("=")[0] for v in required] and not val]
+assert not missing, f"Missing env vars: {', '.join(missing)}"
 
 # ==============================
 # 2. ЛОГИРОВАНИЕ
 # ==============================
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if DEBUG_SEARCH else logging.INFO,
     format="%(asctime)s %(levelname)s: %(message)s"
 )
 log = logging.getLogger(__name__)
 
-# Включаем DEBUG только при явной переменной
-if os.getenv("DEBUG_SEARCH", "false").lower() == "true":
-    logging.getLogger().setLevel(logging.DEBUG)
-
 # ==============================
-# 3. HTTP СЕССИИ
+# 3. СЕССИИ
 # ==============================
 cu = requests.Session()
-cu.headers.update({
-    "Authorization": CLICKUP_TOKEN,
-    "Content-Type": "application/json"
-})
+cu.headers.update({"Authorization": CLICKUP_TOKEN, "Content-Type": "application/json"})
 cu.timeout = 15
 
 ic = requests.Session()
@@ -104,93 +87,70 @@ def _save_state(state: dict):
 def _rate_limit_sleep(resp: requests.Response) -> bool:
     if resp.status_code == 429:
         wait = int(resp.headers.get("Retry-After", "10"))
-        log.warning(f"Rate-limited – sleeping {wait}s")
+        log.warning(f"Rate limited — sleeping {wait}s")
         time.sleep(wait)
         return True
     return False
 
 # ==============================
-# 5. CLICKUP API
+# 5. CLICKUP
 # ==============================
 def check_team_access(team_id: str):
-    url = f"https://api.clickup.com/api/v2/team/{team_id}"
-    r = cu.get(url)
-    while _rate_limit_sleep(r):
-        r = cu.get(url)
+    r = cu.get(f"https://api.clickup.com/api/v2/team/{team_id}")
+    while _rate_limit_sleep(r): r = cu.get(f"https://api.clickup.com/api/v2/team/{team_id}")
     r.raise_for_status()
     log.info(f"Team access OK: {r.json()['team']['name']}")
 
 def fetch_folders(space_id: str):
-    url = f"https://api.clickup.com/api/v2/space/{space_id}/folder"
-    r = cu.get(url, params={"archived": "false"})
-    while _rate_limit_sleep(r):
-        r = cu.get(url, params={"archived": "false"})
+    r = cu.get(f"https://api.clickup.com/api/v2/space/{space_id}/folder", params={"archived": "false"})
+    while _rate_limit_sleep(r): r = cu.get(...)
     r.raise_for_status()
     return r.json().get("folders", [])
 
 def fetch_lists_from_folder(folder_id: str):
-    url = f"https://api.clickup.com/api/v2/folder/{folder_id}/list"
-    r = cu.get(url, params={"archived": "false"})
-    while _rate_limit_sleep(r):
-        r = cu.get(url, params={"archived": "false"})
+    r = cu.get(f"https://api.clickup.com/api/v2/folder/{folder_id}/list", params={"archived": "false"})
+    while _rate_limit_sleep(r): r = cu.get(...)
     r.raise_for_status()
     return r.json().get("lists", [])
 
 def fetch_folderless_lists(space_id: str):
-    url = f"https://api.clickup.com/api/v2/space/{space_id}/list"
-    r = cu.get(url, params={"archived": "false"})
-    while _rate_limit_sleep(r):
-        r = cu.get(url, params={"archived": "false"})
+    r = cu.get(f"https://api.clickup.com/api/v2/space/{space_id}/list", params={"archived": "false"})
+    while _rate_limit_sleep(r): r = cu.get(...)
     r.raise_for_status()
     return r.json().get("lists", [])
 
 def fetch_tasks_from_list(list_id: str, updated_after: datetime):
     page = 0
     updated_gt = int(updated_after.timestamp() * 1000) if not FETCH_ALL else None
-
     while True:
         params = {
-            "page": page,
-            "include_subtasks": "true",
-            "archived": "false",
-            "order_by": "updated",
-            "reverse": "true",
-            "subtasks": "true",
-            "limit": 100,
-            "include_markdown_description": "true",
+            "page": page, "include_subtasks": "true", "archived": "false",
+            "order_by": "updated", "reverse": "true", "limit": 100,
+            "include_markdown_description": "true"
         }
-        if updated_gt:
-            params["updated_gt"] = updated_gt
-        if CLICKUP_ONLY_OPEN:
-            params["statuses[]"] = ["to do", "in progress"]
+        if updated_gt: params["updated_gt"] = updated_gt
+        if CLICKUP_ONLY_OPEN: params["statuses[]"] = ["to do", "in progress"]
 
         r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
-        while _rate_limit_sleep(r):
-            r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
+        while _rate_limit_sleep(r): r = cu.get(...)
         r.raise_for_status()
-
         batch = r.json().get("tasks", [])
-        if not batch:
-            break
-
+        if not batch: break
         for t in batch:
-            desc = t.get("markdown_description") or t.get("description") or ""
-            t["description"] = desc
+            t["description"] = t.get("markdown_description") or t.get("description") or ""
             yield t
-
         page += 1
 
 def fetch_clickup_tasks(updated_after: datetime):
     for folder in fetch_folders(SPACE_ID):
         for lst in fetch_lists_from_folder(folder["id"]):
             if lst["id"] in IGNORED_LIST_IDS:
-                log.info(f"Skipping ignored list: {lst['name']} (ID: {lst['id']})")
+                log.info(f"Skipping list: {lst['name']} (ID: {lst['id']})")
                 continue
             yield from fetch_tasks_from_list(lst["id"], updated_after)
-
     for lst in fetch_folderless_lists(SPACE_ID):
         if lst["id"] in IGNORED_LIST_IDS:
-            log.info(f"Skipping ignored list: {lst['name']} (ID: {lst['id']})")
+            log.info(f"Skipping list: {lst['name']} (ID: {lst['id']})")
             continue
         yield from fetch_tasks_from_list(lst["id"], updated_after)
 
@@ -202,50 +162,70 @@ def task_to_html(task: dict) -> str:
     desc = task.get("description") or ""
     body = markdown(desc) if desc else "<p><em>Нет описания</em></p>"
     if len(body) > 50_000:
-        body = body[:50_000] + "<p><em>Описание урезано из-за длины</em></p>"
+        body = body[:50_000] + "<p><em>Описание урезано</em></p>"
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 7. INTERCOM API
+# 7. INTERCOM: НАДЁЖНЫЙ ПОИСК
 # ==============================
 def find_existing_article(title: str, task_id: str):
     unique_title = f"{title} [{task_id}]".strip()
-    log.debug(f"Searching for: '{unique_title}'")
+    log.debug(f"Searching Intercom for: '{unique_title}'")
 
     url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}
+    page = 1
+    scanned = 0
+
     while url:
-        r = ic.get(url)
-        while _rate_limit_sleep(r):
-            r = ic.get(url)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            r = ic.get(url, params=params if "page" not in url else None)
+            while _rate_limit_sleep(r):
+                r = ic.get(url, params=params if "page" not in url else None)
+            r.raise_for_status()
+            data = r.json()
 
-        for art in data.get("data", []):
-            art_title = art.get("title", "").strip()
-            if art_title == unique_title:
-                log.info(f"Found: '{unique_title}' (ID: {art['id']})")
-                return art
-            else:
-                log.debug(f"  ≠ '{art_title}'")
+            articles = data.get("data", [])
+            scanned += len(articles)
+            log.debug(f"Page {page}: {len(articles)} articles (total scanned: {scanned})")
 
-        url = data.get("pages", {}).get("next")
+            for art in articles:
+                art_title = art.get("title", "").strip()
+                if art_title == unique_title:
+                    log.info(f"FOUND: '{unique_title}' (ID: {art['id']})")
+                    return art
+                else:
+                    log.debug(f"  ≠ '{art_title}'")
 
-    log.debug(f"Not found: '{unique_title}'")
+            next_url = data.get("pages", {}).get("next")
+            url = next_url
+            params = {}  # next_url уже содержит параметры
+            page += 1
+
+        except Exception as e:
+            log.error(f"Error fetching page {page}: {e}")
+            break
+
+    log.warning(f"NOT FOUND: '{unique_title}' after {page-1} pages ({scanned} articles)")
+    if DEBUG_SEARCH:
+        log.debug(f"Last URL: {url}")
     return None
 
+# ==============================
+# 8. СОЗДАНИЕ
+# ==============================
 def create_internal_article(task: dict):
     task_id = task["id"]
     title_base = task.get("name") or "(Без названия)"
     title = f"{title_base} [{task_id}]"[:255]
-    html_body = task_to_html(task)[:50_000]
+    body = task_to_html(task)[:50_000]
 
     payload = {
         "title": title,
-        "body": html_body,
+        "body": body,
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
         "locale": "en",
-        # НЕТ parent_id — статья создаётся без папки
     }
 
     if DRY_RUN:
@@ -262,21 +242,27 @@ def create_internal_article(task: dict):
         log.info(f"Created ID: {art_id}")
         return art_id
     else:
-        log.error(f"Create failed ({r.status_code}): {r.text}")
+        log.error(f"Create failed: {r.status_code} {r.text}")
         return None
 
+# ==============================
+# 9. UPSERT
+# ==============================
 def upsert_internal_article(task: dict) -> tuple[int, int]:
     task_id = task["id"]
     title_base = task.get("name") or "(Без названия)"
 
     existing = find_existing_article(title_base, task_id)
     if existing:
-        log.info(f"Skipping: {title_base} (already exists as ID {existing['id']})")
+        log.info(f"SKIPPED: '{title_base}' (exists as ID {existing['id']})")
         return 0, 1
 
     create_internal_article(task)
     return 1, 0
 
+# ==============================
+# 10. ОЧИСТКА ДУБЛЕЙ
+# ==============================
 def cleanup_duplicates():
     if DRY_RUN:
         log.info("[DRY_RUN] Would cleanup duplicates")
@@ -284,7 +270,8 @@ def cleanup_duplicates():
 
     log.info("Starting duplicate cleanup...")
     articles = []
-    url = f"{INTERCOM_BASE}/internal_articles"
+    url = f"{INTERCOM_BASE}/internal_articles?per_page=100"
+
     while url:
         r = ic.get(url)
         r.raise_for_status()
@@ -295,26 +282,25 @@ def cleanup_duplicates():
     title_to_ids = {}
     for art in articles:
         full = art.get("title", "").strip()
-        base = full.split(" [", 1)[0] if "[" in full else full
+        base = full.split(" [", 1)[0] if " [" in full else full
         title_to_ids.setdefault(base, []).append(art["id"])
 
     deleted = 0
     for base, ids in title_to_ids.items():
-        if len(ids) <= 1:
-            continue
+        if len(ids) <= 1: continue
         keep = min(ids)
         for del_id in [i for i in ids if i != keep]:
             dr = ic.delete(f"{INTERCOM_BASE}/internal_articles/{del_id}")
             if dr.status_code in (200, 204):
-                log.info(f"Deleted duplicate ID {del_id} ('{base}')")
+                log.info(f"Deleted duplicate: '{base}' (ID {del_id})")
                 deleted += 1
             else:
-                log.error(f"Failed delete {del_id}: {dr.status_code}")
+                log.error(f"Delete failed {del_id}: {dr.status_code}")
 
-    log.info(f"Cleanup done – removed {deleted} duplicates")
+    log.info(f"Cleanup complete — removed {deleted} duplicates")
 
 # ==============================
-# 8. MAIN
+# 11. MAIN
 # ==============================
 def main():
     if CLEANUP_DUPLICATES:
@@ -323,18 +309,14 @@ def main():
 
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
-
-    if last_sync_iso and not FETCH_ALL:
-        updated_after = datetime.fromisoformat(last_sync_iso)
-    else:
-        updated_after = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    updated_after = datetime.fromisoformat(last_sync_iso) if last_sync_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
 
     log.info(f"Syncing tasks updated after {updated_after.isoformat()}")
 
     try:
         check_team_access(CLICKUP_TEAM_ID)
     except Exception as e:
-        log.error(f"Team access failed: {e}")
+        log.error(f"Team check failed: {e}")
         return
 
     created = skipped = 0
@@ -350,7 +332,7 @@ def main():
     state["last_sync_iso"] = now_iso
     _save_state(state)
 
-    log.info(f"Done – created: {created}, skipped: {skipped}, last_sync: {now_iso}")
+    log.info(f"Sync complete — Created: {created}, Skipped: {skipped}, Last sync: {now_iso}")
 
 if __name__ == "__main__":
     main()
