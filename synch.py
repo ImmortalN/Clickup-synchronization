@@ -165,7 +165,11 @@ def task_to_html(task: dict) -> str:
 # 7. INTERCOM ARTICLES
 # ==============================
 def load_all_intercom_articles() -> dict[str, int]:
-    """Load all Intercom internal articles with correct cursor-based pagination"""
+    """
+    Load all Intercom internal articles using proper cursor-based pagination.
+    Prevents duplicates and infinite loops.
+    Returns: dict mapping ClickUp task_id -> Intercom article_id
+    """
     log.info("Loading all Intercom articles into memory...")
     task_id_to_article_id = {}
     seen_ids = set()
@@ -189,7 +193,7 @@ def load_all_intercom_articles() -> dict[str, int]:
                 log.info(f"No more articles — loaded {total_loaded} total")
                 break
 
-            # Detect potential loops
+            # Detect potential loop
             first_id = articles[0]["id"]
             if first_id in seen_ids:
                 log.warning(f"Detected loop at ID {first_id} — stopping pagination")
@@ -212,7 +216,7 @@ def load_all_intercom_articles() -> dict[str, int]:
                         task_id_to_article_id[task_id] = art_id
                         total_loaded += 1
 
-            # **Set cursor to last article in current batch**
+            # Set cursor to last article in current batch
             cursor = articles[-1]["id"]
             page_num += 1
 
@@ -222,6 +226,7 @@ def load_all_intercom_articles() -> dict[str, int]:
 
     log.info(f"Loaded {total_loaded} articles with task_id")
     return task_id_to_article_id
+
 
 
 # ==============================
