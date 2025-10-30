@@ -215,4 +215,85 @@ def load_all_intercom_articles() -> dict[str, int]:
             break
 
     log.info(f"Loaded {total_loaded} articles with task_id")
-    return task_id_to
+    return task_id_to_article_id
+
+def create_internal_article(task: dict, intercom_map: dict) -> int | None:
+    task_id = task["id"]
+    title_base = task.get("name") or "(Без названия)"
+    title = f"{title_base} [{task_id}]"[:255]
+    body = task_to_html(task)[:50_000]
+
+    payload = {
+        "title": title,
+        "body": body,
+        "owner_id": INTERCOM_OWNER_ID,
+        "author_id": INTERCOM_AUTHOR_ID,
+        "locale": "en"
+    }
+
+    if DRY_RUN:
+        log.info(f"[DRY_RUN] Would create: {title}")
+        return None
+
+    r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+    while _rate_limit_sleep(r):
+        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+
+    if r.status_code in (200, 201):
+        art_id = r.json().get("id")
+        log.info(f"Created: {title} (ID {art_id})")
+        intercom_map[task_id] = art_id
+        return art_id
+    else:
+        log.error(f"Create failed: {r.status_code} {r.text}")
+        return None
+
+# ==============================
+# 8. MAIN
+# ==============================
+def main():
+    if CLEANUP_DUPLICATES:
+        log.info("Cleaning up duplicates...")
+        return
+    if MOVE_TO_ROOT:
+        log.info("Moving articles to root...")
+        return
+
+    # Load existing Intercom articles
+    intercom_map = load_all_intercom_articles()
+
+    # Load last sync time
+    state = _load_state()
+    last_sync_iso = state.get("last_sync_iso")
+    updated_after = datetime.fromisoformat(last_sync_iso) if last_sync_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    log.info(f"Syncing tasks updated after {updated_after.isoformat()}")
+
+    try:
+        check_team_access(CLICKUP_TEAM_ID)
+    except Exception as e:
+        log.error(f"Team check failed: {e}")
+        return
+
+    created = skipped = 0
+    for task in fetch_clickup_tasks(updated_after):
+        task_id = task["id"]
+        title_base = task.get("name") or "(Без названия)"
+
+        if task_id in intercom_map:
+            log.info(f"SKIPPED: '{title_base}' (ID {intercom_map[task_id]})")
+            skipped += 1
+            continue
+
+        new_id = create_internal_article(task, intercom_map)
+        if new_id or DRY_RUN:
+            created += 1
+
+    # Save sync state
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state["last_sync_iso"] = now_iso
+    _save_state(state)
+    log.info(f"Sync complete — Created: {created}, Skipped: {skipped}, Last sync: {now_iso}")
+
+
+if __name__ == "__main__":
+    main()
