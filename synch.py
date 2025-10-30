@@ -165,19 +165,15 @@ def task_to_html(task: dict) -> str:
 # 7. INTERCOM ARTICLES
 # ==============================
 def load_all_intercom_articles() -> dict[str, int]:
-    """
-    Load all Intercom internal articles using proper cursor-based pagination.
-    Prevents duplicates and infinite loops.
-    Returns: dict mapping ClickUp task_id -> Intercom article_id
-    """
     log.info("Loading all Intercom articles into memory...")
     task_id_to_article_id = {}
     seen_ids = set()
     total_loaded = 0
     page_num = 1
-    cursor = None  # Track the actual last article ID
+    cursor = None  # ← ТОЧНЫЙ КУРСОР
 
     while True:
+        # ← НОВЫЙ params КАЖДЫЙ РАЗ
         params = {"per_page": 100}
         if cursor:
             params["starting_after"] = cursor
@@ -185,18 +181,22 @@ def load_all_intercom_articles() -> dict[str, int]:
         try:
             r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
             while _rate_limit_sleep(r):
+                time.sleep(2)
                 r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
-            r.raise_for_status()
+
+            if r.status_code != 200:
+                log.error(f"HTTP {r.status_code}")
+                break
 
             articles = r.json().get("data", [])
             if not articles:
                 log.info(f"No more articles — loaded {total_loaded} total")
                 break
 
-            # Detect potential loop
+            # ← Проверка зацикливания
             first_id = articles[0]["id"]
             if first_id in seen_ids:
-                log.warning(f"Detected loop at ID {first_id} — stopping pagination")
+                log.warning(f"Detected loop at ID {first_id} — stopping")
                 break
 
             log.debug(f"Page {page_num}: {len(articles)} articles")
@@ -216,7 +216,7 @@ def load_all_intercom_articles() -> dict[str, int]:
                         task_id_to_article_id[task_id] = art_id
                         total_loaded += 1
 
-            # Set cursor to last article in current batch
+            # ← КЛЮЧЕВОЙ ФИКС: cursor = последний ID из текущей страницы
             cursor = articles[-1]["id"]
             page_num += 1
 
@@ -226,7 +226,6 @@ def load_all_intercom_articles() -> dict[str, int]:
 
     log.info(f"Loaded {total_loaded} articles with task_id")
     return task_id_to_article_id
-
 
 
 # ==============================
