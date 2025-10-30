@@ -4,17 +4,17 @@
 """
 Синхронизация ClickUp → Intercom
 ЛОГИКА:
-1. Берём задачи из ClickUp от НОВЫХ к СТАРЫМ
-2. Для каждой:
-   - Если [task_id] ЕСТЬ в Intercom → СТОП
-   - Если НЕТ → СОЗДАЁМ
-3. Никаких дат, состояний, сложностей
+1. Получаем ВСЕ задачи из ClickUp
+2. Сортируем ЛОКАЛЬНО по date_created от НОВЫХ к СТАРЫМ
+3. Для каждой: если [task_id] ЕСТЬ в Intercom → СТОП
+4. Если НЕТ → СОЗДАЁМ
 """
 
 import os
 import time
 import html
 import logging
+from datetime import datetime
 
 import requests
 from markdown import markdown
@@ -73,40 +73,60 @@ def _rate_limit_sleep(resp: requests.Response) -> bool:
     return False
 
 # ==============================
-# 5. CLICKUP: задачи от новых к старым
+# 5. CLICKUP: все задачи + локальная сортировка по date_created (от новых к старым)
 # ==============================
-def fetch_clickup_tasks():
-    # Все списки
-    lists = []
-    for folder in cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/folder", params={"archived": "false"}).json().get("folders", []):
-        lists.extend(cu.get(f"https://api.clickup.com/api/v2/folder/{folder['id']}/list", params={"archived": "false"}).json().get("lists", []))
-    lists.extend(cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/list", params={"archived": "false"}).json().get("lists", []))
+def fetch_clickup_tasks_sorted():
+    log.info("Fetching all ClickUp tasks...")
+    all_tasks = []
 
+    # Получаем все списки
+    lists = []
+    folders_resp = cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/folder", params={"archived": "false"})
+    while _rate_limit_sleep(folders_resp): folders_resp = cu.get(...)
+    folders_resp.raise_for_status()
+    for folder in folders_resp.json().get("folders", []):
+        lists_resp = cu.get(f"https://api.clickup.com/api/v2/folder/{folder['id']}/list", params={"archived": "false"})
+        while _rate_limit_sleep(lists_resp): lists_resp = cu.get(...)
+        lists_resp.raise_for_status()
+        lists.extend(lists_resp.json().get("lists", []))
+
+    lists_resp = cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/list", params={"archived": "false"})
+    while _rate_limit_sleep(lists_resp): lists_resp = cu.get(...)
+    lists_resp.raise_for_status()
+    lists.extend(lists_resp.json().get("lists", []))
+
+    # Для каждого списка — получаем задачи
     for lst in lists:
         if lst["id"] in IGNORED_LIST_IDS:
             continue
         page = 0
         while True:
-            r = cu.get(f"https://api.clickup.com/api/v2/list/{lst['id']}/task", params={
+            tasks_resp = cu.get(f"https://api.clickup.com/api/v2/list/{lst['id']}/task", params={
                 "page": page,
                 "include_subtasks": "true",
                 "archived": "false",
-                "order_by": "created",
-                "reverse": "true",  # ← ОТ НОВЫХ К СТАРЫМ
                 "limit": 100,
                 "include_markdown_description": "true"
             })
-            while _rate_limit_sleep(r): r = cu.get(...)
-            r.raise_for_status()
-            tasks = r.json().get("tasks", [])
-            if not tasks: break
-            for t in tasks:
+            while _rate_limit_sleep(tasks_resp): tasks_resp = cu.get(...)
+            tasks_resp.raise_for_status()
+            batch = tasks_resp.json().get("tasks", [])
+            if not batch:
+                break
+            for t in batch:
                 t["description"] = t.get("markdown_description") or t.get("description") or ""
-                yield t
+                t["date_created"] = datetime.fromisoformat(t.get("date_created", "1970-01-01T00:00:00Z").replace('Z', '+00:00'))
+                all_tasks.append(t)
             page += 1
 
+    # === ЛОКАЛЬНАЯ СОРТИРОВКА: от новых к старым ===
+    all_tasks.sort(key=lambda t: t["date_created"], reverse=True)
+    log.info(f"Fetched {len(all_tasks)} tasks, sorted by creation date (newest first)")
+
+    return all_tasks
+
 # ==============================
-# 6. INTERCOM: есть ли [task_id]?
+# 6. INTERCOM: есть ли [task_id] в конце title?
 # ==============================
 def article_exists(task_id: str) -> bool:
     marker = f"[{task_id}]"
@@ -174,19 +194,19 @@ def create_article(task: dict) -> bool:
 # 8. MAIN: от новых → до первого существующего
 # ==============================
 def main():
-    log.info("Starting sync: from newest → stop at first existing")
+    log.info("Starting sync: from newest ClickUp tasks → stop at first existing")
 
     created = 0
-    for task in fetch_clickup_tasks():
+    all_tasks = list(fetch_clickup_tasks_sorted())  # Получаем все + сортируем локально
+
+    for task in all_tasks:  # Уже отсортировано от новых к старым
         task_id = task["id"]
         title_base = task.get("name") or "(Без названия)"
 
-        # === ПРОВЕРКА ===
         if article_exists(task_id):
-            log.info(f"STOPPING: found existing guide for [{task_id}]")
+            log.info(f"STOPPING: found existing guide for [{task_id}] — '{title_base}'")
             break
 
-        # === СОЗДАНИЕ ===
         if create_article(task):
             created += 1
 
