@@ -198,30 +198,31 @@ def load_all_intercom_articles() -> dict[str, int]:
     total_loaded = 0
     page_num = 1
     cursor = None
-
+    
     while True:
         params = {"per_page": 100}
         if cursor:
             params["starting_after"] = cursor
-
+        
         try:
             r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
             while _rate_limit_sleep(r):
                 time.sleep(2)
                 r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
-
+            
             if r.status_code != 200:
                 log.error(f"HTTP {r.status_code}")
                 break
-
+            
             data = r.json()
             articles = data.get("data", [])
+            
             if not articles:
                 log.info(f"No more articles — loaded {total_loaded} total")
                 break
-
+            
             log.debug(f"Page {page_num}: {len(articles)} articles")
-
+            
             for art in articles:
                 title = art.get("title", "")
                 if "[" in title and "]" in title:
@@ -231,14 +232,14 @@ def load_all_intercom_articles() -> dict[str, int]:
                         task_id = title[start+1:end]
                         task_id_to_article_id[task_id] = art["id"]
                         total_loaded += 1
-
+            
             cursor = articles[-1]["id"]
             page_num += 1
-
+            
         except Exception as e:
             log.error(f"Error loading articles: {e}")
             break
-
+    
     log.info(f"Loaded {total_loaded} articles with task_id")
     return task_id_to_article_id
 
@@ -287,19 +288,14 @@ def cleanup_duplicates():
 
     log.info("Starting duplicate cleanup...")
     articles = []
-    seen_ids = set()
-    total_pages = 0
-    cursor = None
+    url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}
 
     while True:
-        params = {"per_page": 100}
-        if cursor:
-            params["starting_after"] = cursor
-
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
+        r = ic.get(url, params=params)
         while _rate_limit_sleep(r):
             time.sleep(2)
-            r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
+            r = ic.get(url, params=params)
 
         if r.status_code != 200:
             log.error(f"HTTP {r.status_code} in cleanup")
@@ -307,18 +303,12 @@ def cleanup_duplicates():
 
         data = r.json()
         batch = data.get("data", [])
+        articles.extend(batch)
+
         if not batch:
             break
 
-        first_id = batch[0]["id"]
-        if first_id in seen_ids:
-            log.warning(f"Duplicate ID {first_id} in cleanup — stopping")
-            break
-
-        articles.extend(batch)
-        seen_ids.update(art["id"] for art in batch)
-        cursor = batch[-1]["id"]
-        total_pages += 1
+        params["starting_after"] = batch[-1]["id"]
 
     title_to_ids = {}
     for art in articles:
@@ -349,19 +339,14 @@ def move_all_to_root():
         return
 
     log.info("Moving all articles to root...")
-    seen_ids = set()
-    total_pages = 0
-    cursor = None
+    url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}
 
     while True:
-        params = {"per_page": 100}
-        if cursor:
-            params["starting_after"] = cursor
-
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
+        r = ic.get(url, params=params)
         while _rate_limit_sleep(r):
             time.sleep(2)
-            r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
+            r = ic.get(url, params=params)
 
         if r.status_code != 200:
             log.error(f"HTTP {r.status_code} in move_to_root")
@@ -369,13 +354,6 @@ def move_all_to_root():
 
         data = r.json()
         batch = data.get("data", [])
-        if not batch:
-            break
-
-        first_id = batch[0]["id"]
-        if first_id in seen_ids:
-            log.warning(f"Duplicate ID {first_id} — stopping")
-            break
 
         for art in batch:
             if art.get("parent_id"):
@@ -383,9 +361,10 @@ def move_all_to_root():
                 if put_r.status_code == 200:
                     log.info(f"Moved to root: {art['title']} (ID: {art['id']})")
 
-        seen_ids.update(art["id"] for art in batch)
-        cursor = batch[-1]["id"]
-        total_pages += 1
+        if not batch:
+            break
+
+        params["starting_after"] = batch[-1]["id"]
 
     log.info("All articles moved to root")
 
