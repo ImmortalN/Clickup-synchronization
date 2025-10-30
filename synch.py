@@ -190,7 +190,7 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ИЗ INTERCOM (ФИНАЛЬНАЯ ВЕРСИЯ)
+# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ИЗ INTERCOM (ФИНАЛЬНАЯ)
 # ==============================
 def load_all_intercom_articles() -> dict[str, int]:
     log.info("Loading all Intercom articles into memory...")
@@ -216,7 +216,6 @@ def load_all_intercom_articles() -> dict[str, int]:
             
             data = r.json()
             articles = data.get("data", [])
-            
             if not articles:
                 log.info(f"No more articles — loaded {total_loaded} total")
                 break
@@ -235,7 +234,7 @@ def load_all_intercom_articles() -> dict[str, int]:
             
             cursor = articles[-1]["id"]
             page_num += 1
-            
+        
         except Exception as e:
             log.error(f"Error loading articles: {e}")
             break
