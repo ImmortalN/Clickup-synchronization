@@ -3,10 +3,12 @@
 
 """
 Синхронизация ClickUp → Intercom
-ЛОГИКА: от новых к старым → до первого существующего гайда → СТОП
-- task_id всегда в конце: "Title [task_id]"
-- Минимум запросов
-- Никаких дублей
+ЛОГИКА:
+1. Берем задачи из ClickUp ПОСЛЕ last_sync_iso (или LOOKBACK_HOURS)
+2. Идем от новых к старым
+3. Если [task_id] есть в Intercom → SKIP
+4. Если нет → CREATE
+5. Обновляем last_sync_iso
 """
 
 import os
@@ -35,6 +37,7 @@ INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+LOOKBACK_HOURS = int(os.getenv("LOOKBACK_HOURS", "24"))  # fallback
 
 SPACE_ID = "90125205902"
 IGNORED_LIST_IDS = {"901212791461", "901212763746"}
@@ -85,18 +88,19 @@ def _rate_limit_sleep(resp: requests.Response) -> bool:
     return False
 
 # ==============================
-# 5. CLICKUP: задачи от новых к старым
+# 5. CLICKUP: задачи ПОСЛЕ last_sync_iso
 # ==============================
-def fetch_clickup_tasks():
+def fetch_clickup_tasks(since: datetime):
+    since_ms = int(since.timestamp() * 1000)
     for folder in cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/folder", params={"archived": "false"}).json().get("folders", []):
         for lst in cu.get(f"https://api.clickup.com/api/v2/folder/{folder['id']}/list", params={"archived": "false"}).json().get("lists", []):
             if lst["id"] in IGNORED_LIST_IDS: continue
-            yield from _fetch_tasks_from_list(lst["id"])
+            yield from _fetch_tasks_from_list(lst["id"], since_ms)
     for lst in cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/list", params={"archived": "false"}).json().get("lists", []):
         if lst["id"] in IGNORED_LIST_IDS: continue
-        yield from _fetch_tasks_from_list(lst["id"])
+        yield from _fetch_tasks_from_list(lst["id"], since_ms)
 
-def _fetch_tasks_from_list(list_id: str):
+def _fetch_tasks_from_list(list_id: str, since_ms: int):
     page = 0
     while True:
         r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params={
@@ -104,8 +108,9 @@ def _fetch_tasks_from_list(list_id: str):
             "include_subtasks": "true",
             "archived": "false",
             "order_by": "created",
-            "reverse": "true",  # ← ОТ НОВЫХ К СТАРЫМ
+            "reverse": "true",  # от новых к старым
             "limit": 100,
+            "date_created_gt": since_ms,  # ← ТОЛЬКО НОВЫЕ
             "include_markdown_description": "true"
         })
         while _rate_limit_sleep(r): r = cu.get(...)
@@ -131,7 +136,6 @@ def article_exists(task_id: str) -> bool:
             time.sleep(2)
             r = ic.get(url, params=params)
         if r.status_code != 200:
-            log.error(f"HTTP {r.status_code} while checking existence")
             return False
 
         articles = r.json().get("data", [])
@@ -140,7 +144,7 @@ def article_exists(task_id: str) -> bool:
 
         for art in articles:
             if art.get("title", "").endswith(marker):
-                log.info(f"FOUND existing: {art['title']} (ID: {art['id']})")
+                log.debug(f"FOUND existing: {art['title']} (ID: {art['id']})")
                 return True
 
         params["starting_after"] = articles[-1]["id"]
@@ -185,27 +189,29 @@ def create_article(task: dict) -> int | None:
         return None
 
 # ==============================
-# 8. MAIN: от новых → до первого существующего
+# 8. MAIN
 # ==============================
 def main():
-    log.info("Starting sync: from newest ClickUp tasks → stop at first existing guide")
+    log.info("Starting sync: only tasks after last_sync_iso")
+
+    state = _load_state()
+    last_sync_iso = state.get("last_sync_iso")
+    since = datetime.fromisoformat(last_sync_iso) if last_sync_iso else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    log.info(f"Fetching tasks created after: {since.isoformat()}")
 
     created = 0
-    for task in fetch_clickup_tasks():
+    for task in fetch_clickup_tasks(since):
         task_id = task["id"]
         title_base = task.get("name") or "(Без названия)"
 
-        # === ПРОВЕРКА: есть ли [task_id] в Intercom? ===
         if article_exists(task_id):
-            log.info(f"STOPPING: found existing guide for task_id [{task_id}]")
-            break
+            log.info(f"SKIPPED (already exists): {title_base} [{task_id}]")
+            continue
 
-        # === СОЗДАЁМ ===
         if create_article(task):
             created += 1
 
-    # === Обновляем время последнего синка ===
-    state = _load_state()
+    # Обновляем время
     state["last_sync_iso"] = datetime.now(timezone.utc).isoformat()
     _save_state(state)
 
