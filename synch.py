@@ -165,16 +165,18 @@ def task_to_html(task: dict) -> str:
 # 7. INTERCOM ARTICLES
 # ==============================
 def load_all_intercom_articles() -> dict[str, int]:
+    """Load all Intercom internal articles with correct cursor-based pagination"""
     log.info("Loading all Intercom articles into memory...")
     task_id_to_article_id = {}
     seen_ids = set()
     total_loaded = 0
     page_num = 1
+    cursor = None  # Track the actual last article ID
 
     while True:
-        params = {"per_page": 100}  # fresh dict for each request
-        if seen_ids:
-            params["starting_after"] = max(seen_ids)  # safe cursor
+        params = {"per_page": 100}
+        if cursor:
+            params["starting_after"] = cursor
 
         try:
             r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
@@ -187,16 +189,18 @@ def load_all_intercom_articles() -> dict[str, int]:
                 log.info(f"No more articles — loaded {total_loaded} total")
                 break
 
+            # Detect potential loops
             first_id = articles[0]["id"]
             if first_id in seen_ids:
-                log.warning(f"Detected repeated first ID {first_id} — stopping pagination")
+                log.warning(f"Detected loop at ID {first_id} — stopping pagination")
                 break
 
             log.debug(f"Page {page_num}: {len(articles)} articles")
 
             for art in articles:
                 art_id = art.get("id")
-                if not art_id or art_id in seen_ids: continue
+                if not art_id or art_id in seen_ids:
+                    continue
                 seen_ids.add(art_id)
 
                 title = art.get("title", "")
@@ -208,6 +212,8 @@ def load_all_intercom_articles() -> dict[str, int]:
                         task_id_to_article_id[task_id] = art_id
                         total_loaded += 1
 
+            # **Set cursor to last article in current batch**
+            cursor = articles[-1]["id"]
             page_num += 1
 
         except Exception as e:
@@ -217,36 +223,6 @@ def load_all_intercom_articles() -> dict[str, int]:
     log.info(f"Loaded {total_loaded} articles with task_id")
     return task_id_to_article_id
 
-def create_internal_article(task: dict, intercom_map: dict) -> int | None:
-    task_id = task["id"]
-    title_base = task.get("name") or "(Без названия)"
-    title = f"{title_base} [{task_id}]"[:255]
-    body = task_to_html(task)[:50_000]
-
-    payload = {
-        "title": title,
-        "body": body,
-        "owner_id": INTERCOM_OWNER_ID,
-        "author_id": INTERCOM_AUTHOR_ID,
-        "locale": "en"
-    }
-
-    if DRY_RUN:
-        log.info(f"[DRY_RUN] Would create: {title}")
-        return None
-
-    r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
-    while _rate_limit_sleep(r):
-        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
-
-    if r.status_code in (200, 201):
-        art_id = r.json().get("id")
-        log.info(f"Created: {title} (ID {art_id})")
-        intercom_map[task_id] = art_id
-        return art_id
-    else:
-        log.error(f"Create failed: {r.status_code} {r.text}")
-        return None
 
 # ==============================
 # 8. MAIN
