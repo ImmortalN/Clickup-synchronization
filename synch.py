@@ -5,7 +5,7 @@
 Синхронизация ClickUp → Intercom
 ЛОГИКА:
 1. Получаем ВСЕ задачи из ClickUp
-2. Сортируем ЛОКАЛЬНО по date_created от НОВЫХ к СТАРЫМ
+2. Сортируем ЛОКАЛЬНО по date_created (миллисекунды → datetime)
 3. Для каждой: если [task_id] ЕСТЬ в Intercom → СТОП
 4. Если НЕТ → СОЗДАЁМ
 """
@@ -14,7 +14,7 @@ import os
 import time
 import html
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from markdown import markdown
@@ -73,7 +73,7 @@ def _rate_limit_sleep(resp: requests.Response) -> bool:
     return False
 
 # ==============================
-# 5. CLICKUP: все задачи + локальная сортировка по date_created (от новых к старым)
+# 5. CLICKUP: все задачи + сортировка по date_created (ms → datetime)
 # ==============================
 def fetch_clickup_tasks_sorted():
     log.info("Fetching all ClickUp tasks...")
@@ -95,7 +95,7 @@ def fetch_clickup_tasks_sorted():
     lists_resp.raise_for_status()
     lists.extend(lists_resp.json().get("lists", []))
 
-    # Для каждого списка — получаем задачи
+    # Получаем задачи
     for lst in lists:
         if lst["id"] in IGNORED_LIST_IDS:
             continue
@@ -115,18 +115,20 @@ def fetch_clickup_tasks_sorted():
                 break
             for t in batch:
                 t["description"] = t.get("markdown_description") or t.get("description") or ""
-                t["date_created"] = datetime.fromisoformat(t.get("date_created", "1970-01-01T00:00:00Z").replace('Z', '+00:00'))
+                # КОНВЕРТИРУЕМ МИЛЛИСЕКУНДЫ
+                ms = int(t.get("date_created", 0) or 0)
+                t["date_created"] = datetime.fromtimestamp(ms / 1000, tz=timezone.utc) if ms else datetime.min.replace(tzinfo=timezone.utc)
                 all_tasks.append(t)
             page += 1
 
-    # === ЛОКАЛЬНАЯ СОРТИРОВКА: от новых к старым ===
+    # ЛОКАЛЬНАЯ СОРТИРОВКА: от новых к старым
     all_tasks.sort(key=lambda t: t["date_created"], reverse=True)
     log.info(f"Fetched {len(all_tasks)} tasks, sorted by creation date (newest first)")
 
     return all_tasks
 
 # ==============================
-# 6. INTERCOM: есть ли [task_id] в конце title?
+# 6. INTERCOM: есть ли [task_id]?
 # ==============================
 def article_exists(task_id: str) -> bool:
     marker = f"[{task_id}]"
@@ -191,15 +193,15 @@ def create_article(task: dict) -> bool:
         return False
 
 # ==============================
-# 8. MAIN: от новых → до первого существующего
+# 8. MAIN
 # ==============================
 def main():
     log.info("Starting sync: from newest ClickUp tasks → stop at first existing")
 
     created = 0
-    all_tasks = list(fetch_clickup_tasks_sorted())  # Получаем все + сортируем локально
+    all_tasks = list(fetch_clickup_tasks_sorted())
 
-    for task in all_tasks:  # Уже отсортировано от новых к старым
+    for task in all_tasks:
         task_id = task["id"]
         title_base = task.get("name") or "(Без названия)"
 
