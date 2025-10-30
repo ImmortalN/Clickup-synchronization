@@ -3,10 +3,10 @@
 
 """
 Синхронизация ClickUp → Intercom (Internal Articles)
-ФИНАЛЬНАЯ ВЕРСИЯ: 1 ЗАПРОС НА 100 СТАТЕЙ → ПРОВЕРКА В ПАМЯТИ
-- Никакой пагинации
-- 1 запрос на старте
-- 2000 задач → 1 + 2000 запросов → 30 сек
+ФИНАЛЬНАЯ ВЕРСИЯ: pages.next — ПОЛНАЯ ПАГИНАЦИЯ БЕЗ ЗАЦИКЛИВАНИЯ
+- Используем pages.next из ответа API
+- Никаких starting_after
+- 2000+ гайдов → 20 страниц → 20 секунд
 - 0 дублей
 """
 
@@ -177,22 +177,30 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. ЗАГРУЗКА ПЕРВЫХ 100 СТАТЕЙ (ОДИН РАЗ!)
+# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ЧЕРЕЗ pages.next
 # ==============================
-def load_initial_articles() -> dict[str, int]:
-    """Загружаем первые 100 статей — достаточно для проверки дублей"""
-    log.info("Loading first 100 Intercom articles for duplicate check...")
+def load_all_articles_with_pages() -> dict[str, int]:
+    log.info("Loading ALL Intercom articles using pages.next...")
     task_id_to_article_id = {}
+    url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}
+    page_num = 1
 
-    try:
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"per_page": 100})
-        while _rate_limit_sleep(r):
-            time.sleep(2)
-            r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"per_page": 100})
+    while url:
+        try:
+            r = ic.get(url, params=params)
+            while _rate_limit_sleep(r):
+                time.sleep(2)
+                r = ic.get(url, params=params)
 
-        if r.status_code == 200:
-            articles = r.json().get("data", [])
-            log.info(f"Loaded {len(articles)} articles from first page")
+            if r.status_code != 200:
+                log.error(f"HTTP {r.status_code} at page {page_num}")
+                break
+
+            data = r.json()
+            articles = data.get("data", [])
+            log.debug(f"Page {page_num}: {len(articles)} articles")
+
             for art in articles:
                 title = art.get("title", "")
                 if "[" in title and "]" in title:
@@ -201,16 +209,29 @@ def load_initial_articles() -> dict[str, int]:
                     if start < end:
                         task_id = title[start+1:end]
                         task_id_to_article_id[task_id] = art["id"]
-        else:
-            log.error(f"Failed to load articles: HTTP {r.status_code}")
-    except Exception as e:
-        log.error(f"Error loading articles: {e}")
 
-    log.info(f"Found {len(task_id_to_article_id)} existing task articles")
+            # КЛЮЧ: pages.next
+            pages = data.get("pages", {})
+            next_url = pages.get("next")
+            if next_url:
+                log.debug(f"Moving to next page: {next_url}")
+                url = next_url
+                params = {}  # next_url уже содержит параметры
+            else:
+                log.info("No more pages — done.")
+                url = None
+
+            page_num += 1
+
+        except Exception as e:
+            log.error(f"Error loading page {page_num}: {e}")
+            break
+
+    log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id")
     return task_id_to_article_id
 
 # ==============================
-# 9. СОЗДАНИЕ СТАТЬИ (С ПРОВЕРКОЙ В ПАМЯТИ)
+# 9. СОЗДАНИЕ СТАТЬИ
 # ==============================
 def create_internal_article(task: dict, intercom_map: dict) -> int | None:
     task_id = task["id"]
@@ -218,7 +239,6 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
     title = f"{title_base} [{task_id}]"[:255]
     body = task_to_html(task)[:50_000]
 
-    # ПРОВЕРКА В ПАМЯТИ
     if task_id in intercom_map:
         log.info(f"SKIPPED: '{title_base}' (exists as ID {intercom_map[task_id]})")
         return intercom_map[task_id]
@@ -243,7 +263,7 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
     if r.status_code in (200, 201):
         art_id = r.json().get("id")
         log.info(f"Created: {title} (ID {art_id})")
-        intercom_map[task_id] = art_id  # обновляем карту
+        intercom_map[task_id] = art_id
         return art_id
     else:
         log.error(f"Create failed: {r.status_code} {r.text}")
@@ -253,10 +273,10 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
 # 10. MAIN
 # ==============================
 def main():
-    # 1. Загружаем первые 100 статей ОДИН РАЗ
-    intercom_map = load_initial_articles()
+    # 1. Загружаем ВСЕ статьи через pages.next
+    intercom_map = load_all_articles_with_pages()
 
-    # 2. Определяем, какие задачи синхронизировать
+    # 2. Синхронизация
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
     updated_after = datetime.fromisoformat(last_sync_iso) if last_sync_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
@@ -270,16 +290,12 @@ def main():
 
     created = skipped = 0
     for task in fetch_clickup_tasks(updated_after):
-        task_id = task["id"]
-        title_base = task.get("name") or "(Без названия)"
-
         new_id = create_internal_article(task, intercom_map)
         if new_id or DRY_RUN:
             created += 1
         else:
             skipped += 1
 
-    # 3. Сохраняем время синхронизации
     now_iso = datetime.now(timezone.utc).isoformat()
     state["last_sync_iso"] = now_iso
     _save_state(state)
