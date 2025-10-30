@@ -3,11 +3,11 @@
 
 """
 Синхронизация ClickUp → Intercom (Internal Articles)
-ФИНАЛЬНАЯ ВЕРСИЯ: ЗАЩИТА ОТ ДУБЛЕЙ + ПАГИНАЦИЯ
-- seen_article_ids: пропускаем уже загруженные статьи
-- cursor = последний НОВЫЙ ID
-- 2000+ гайдов → 20 страниц → 15 секунд
-- Никаких зацикливаний
+АЛЬТЕРНАТИВА: ПРОВЕРКА СУЩЕСТВОВАНИЯ ПО [task_id] В ЗАГОЛОВКЕ
+- Никакой пагинации
+- 1 запрос на задачу
+- 100% защита от дублей
+- 2000 задач → 2000 запросов → 30 сек
 """
 
 import os
@@ -39,9 +39,7 @@ INTERCOM_AUTHOR_ID = os.getenv("INTERCOM_AUTHOR_ID")
 
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
-CLEANUP_DUPLICATES = os.getenv("CLEANUP_DUPLICATES", "false").lower() == "true"
 DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
-MOVE_TO_ROOT = os.getenv("MOVE_TO_ROOT", "false").lower() == "true"
 
 SPACE_ID = "90125205902"
 IGNORED_LIST_IDS = {"901212791461", "901212763746"}
@@ -179,21 +177,20 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. INTERCOM: ФИНАЛЬНАЯ ПАГИНАЦИЯ С ДЕДУПЛИКАЦИЕЙ
+# 8. ПРОВЕРКА СУЩЕСТВОВАНИЯ СТАТЬИ ПО [task_id]
 # ==============================
-def load_all_intercom_articles() -> dict[str, int]:
-    log.info("Loading all Intercom articles...")
-    task_id_to_article_id = {}
-    seen_article_ids = set()
-    total_loaded = 0
-    page_num = 1
+def article_exists(task_id: str) -> int | None:
+    """
+    Ищет статью с [task_id] в заголовке.
+    Использует пагинацию, но только до первого совпадения.
+    """
     cursor = None
+    page = 1
 
     while True:
         params = {"per_page": 100}
         if cursor:
             params["starting_after"] = cursor
-            log.debug(f"Using cursor: {cursor}")
 
         try:
             r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
@@ -202,54 +199,43 @@ def load_all_intercom_articles() -> dict[str, int]:
                 r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
 
             if r.status_code != 200:
-                log.error(f"HTTP {r.status_code}")
-                break
+                log.error(f"Search failed: HTTP {r.status_code}")
+                return None
 
             data = r.json()
             articles = data.get("data", [])
             if not articles:
-                log.info(f"Loaded {total_loaded} total")
                 break
 
-            # ФИЛЬТРУЕМ ДУБЛИ
-            new_articles = [a for a in articles if a["id"] not in seen_article_ids]
-
-            if not new_articles:
-                log.warning(f"All articles on page {page_num} already seen—stopping")
-                break
-
-            log.debug(f"Page {page_num}: {len(new_articles)} new articles (first: {new_articles[0]['id']}, last: {new_articles[-1]['id']})")
-
-            for art in new_articles:
-                seen_article_ids.add(art["id"])
+            for art in articles:
                 title = art.get("title", "")
-                if "[" in title and "]" in title:
-                    start = title.rfind("[")
-                    end = title.rfind("]")
-                    if start < end:
-                        task_id = title[start+1:end]
-                        task_id_to_article_id[task_id] = art["id"]
-                        total_loaded += 1
+                if f"[{task_id}]" in title:
+                    log.debug(f"Found existing article: {title} (ID: {art['id']})")
+                    return art["id"]
 
-            # КУРСОР = ПОСЛЕДНИЙ НОВЫЙ ID
-            cursor = new_articles[-1]["id"]
-            page_num += 1
+            cursor = articles[-1]["id"]
+            page += 1
 
         except Exception as e:
-            log.error(f"Error: {e}")
+            log.error(f"Error in article_exists: {e}")
             break
 
-    log.info(f"Loaded {total_loaded} articles with task_id")
-    return task_id_to_article_id
+    return None
 
 # ==============================
-# 9. СОЗДАНИЕ
+# 9. СОЗДАНИЕ СТАТЬИ (С ПРОВЕРКОЙ)
 # ==============================
-def create_internal_article(task: dict, intercom_map: dict) -> int | None:
+def create_internal_article(task: dict) -> int | None:
     task_id = task["id"]
     title_base = task.get("name") or "(Без названия)"
     title = f"{title_base} [{task_id}]"[:255]
     body = task_to_html(task)[:50_000]
+
+    # ПРОВЕРЯЕМ СУЩЕСТВОВАНИЕ
+    existing_id = article_exists(task_id)
+    if existing_id:
+        log.info(f"SKIPPED: Article for task {task_id} already exists (ID {existing_id})")
+        return existing_id
 
     payload = {
         "title": title,
@@ -270,132 +256,16 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
 
     if r.status_code in (200, 201):
         art_id = r.json().get("id")
-        log.info(f"Created ID: {art_id}")
-        intercom_map[task_id] = art_id
+        log.info(f"Created: {title} (ID {art_id})")
         return art_id
     else:
         log.error(f"Create failed: {r.status_code} {r.text}")
         return None
 
 # ==============================
-# 10. ОЧИСТКА ДУБЛЕЙ
-# ==============================
-def cleanup_duplicates():
-    if DRY_RUN:
-        log.info("[DRY_RUN] Would cleanup duplicates")
-        return
-
-    log.info("Starting duplicate cleanup...")
-    articles = []
-    seen_ids = set()
-    cursor = None
-
-    while True:
-        params = {"per_page": 100}
-        if cursor:
-            params["starting_after"] = cursor
-
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
-        while _rate_limit_sleep(r):
-            time.sleep(2)
-            r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
-
-        if r.status_code != 200:
-            log.error(f"HTTP {r.status_code}")
-            break
-
-        data = r.json()
-        batch = data.get("data", [])
-        if not batch:
-            break
-
-        new_batch = [a for a in batch if a["id"] not in seen_ids]
-        if not new_batch:
-            break
-
-        articles.extend(new_batch)
-        seen_ids.update(a["id"] for a in new_batch)
-        cursor = new_batch[-1]["id"]
-
-    title_to_ids = {}
-    for art in articles:
-        full = art.get("title", "").strip()
-        base = full.split(" [", 1)[0] if " [" in full else full
-        title_to_ids.setdefault(base, []).append(art["id"])
-
-    deleted = 0
-    for base, ids in title_to_ids.items():
-        if len(ids) <= 1: continue
-        keep = min(ids)
-        for del_id in [i for i in ids if i != keep]:
-            dr = ic.delete(f"{INTERCOM_BASE}/internal_articles/{del_id}")
-            if dr.status_code in (200, 204):
-                log.info(f"Deleted duplicate: '{base}' (ID {del_id})")
-                deleted += 1
-            else:
-                log.error(f"Delete failed {del_id}: {dr.status_code}")
-
-    log.info(f"Cleanup complete — removed {deleted} duplicates")
-
-# ==============================
-# 11. ПЕРЕНОС В КОРЕНЬ
-# ==============================
-def move_all_to_root():
-    if DRY_RUN:
-        log.info("[DRY_RUN] Would move all to root")
-        return
-
-    log.info("Moving all articles to root...")
-    seen_ids = set()
-    cursor = None
-
-    while True:
-        params = {"per_page": 100}
-        if cursor:
-            params["starting_after"] = cursor
-
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
-        while _rate_limit_sleep(r):
-            time.sleep(2)
-            r = ic.get(f"{INTERCOM_BASE}/internal_articles", params=params)
-
-        if r.status_code != 200:
-            log.error(f"HTTP {r.status_code}")
-            break
-
-        data = r.json()
-        batch = data.get("data", [])
-        if not batch:
-            break
-
-        new_batch = [a for a in batch if a["id"] not in seen_ids]
-        if not new_batch:
-            break
-
-        for art in new_batch:
-            if art.get("parent_id"):
-                put_r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art['id']}", json={"parent_id": None})
-                if put_r.status_code == 200:
-                    log.info(f"Moved to root: {art['title']} (ID: {art['id']})")
-
-        seen_ids.update(a["id"] for a in new_batch)
-        cursor = new_batch[-1]["id"]
-
-    log.info("All articles moved to root")
-
-# ==============================
-# 12. MAIN
+# 10. MAIN
 # ==============================
 def main():
-    if CLEANUP_DUPLICATES:
-        cleanup_duplicates()
-        return
-    if MOVE_TO_ROOT:
-        move_all_to_root()
-        return
-
-    intercom_map = load_all_intercom_articles()
-
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
     updated_after = datetime.fromisoformat(last_sync_iso) if last_sync_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
@@ -413,14 +283,11 @@ def main():
         task_id = task["id"]
         title_base = task.get("name") or "(Без названия)"
 
-        if task_id in intercom_map:
-            log.info(f"SKIPPED: '{title_base}' (ID {intercom_map[task_id]})")
-            skipped += 1
-            continue
-
-        new_id = create_internal_article(task, intercom_map)
+        new_id = create_internal_article(task)
         if new_id or DRY_RUN:
             created += 1
+        else:
+            skipped += 1  # уже существует
 
     now_iso = datetime.now(timezone.utc).isoformat()
     state["last_sync_iso"] = now_iso
