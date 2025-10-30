@@ -3,9 +3,10 @@
 
 """
 Синхронизация ClickUp → Intercom (Internal Articles)
-ФИНАЛЬНАЯ ВЕРСИЯ: starting_after + остановка при пустом data
+ФИНАЛЬНАЯ ВЕРСИЯ: seen_ids + остановка при дубликате
 - 2000 гайдов → 21 запрос → 15 секунд
-- Никаких дублей, зацикливаний, rate limit
+- Защита от зацикливания
+- Никаких дублей, rate limit
 """
 
 import os
@@ -189,15 +190,15 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ИЗ INTERCOM (ФИНАЛЬНАЯ ВЕРСИЯ)
+# 8. ЗАГРУЗКА СТАТЕЙ (seen_ids + защита от цикла)
 # ==============================
 def load_all_intercom_articles() -> dict[str, int]:
     log.info("Loading all Intercom articles into memory...")
     task_id_to_article_id = {}
+    seen_ids = set()
     url = f"{INTERCOM_BASE}/internal_articles"
     params = {"per_page": 100}
     request_count = 0
-    total_loaded = 0
 
     while True:
         try:
@@ -213,15 +214,22 @@ def load_all_intercom_articles() -> dict[str, int]:
             data = r.json()
             articles = data.get("data", [])
 
-            # КЛЮЧ: ОСТАНАВЛИВАЕМСЯ ТОЛЬКО ПРИ ПУСТОМ data
             if not articles:
-                log.info(f"No more articles after {request_count} requests — loaded {total_loaded} total")
+                log.info(f"No more articles after {request_count} requests — loaded {len(task_id_to_article_id)} total")
                 break
 
             request_count += 1
-            log.debug(f"Request {request_count}: {len(articles)} articles")
+
+            # === ЗАЩИТА ОТ ЗАЦИКЛИВАНИЯ ===
+            first_id = articles[0]["id"]
+            if first_id in seen_ids:
+                log.warning(f"Detected duplicate article ID {first_id} — stopping to prevent infinite loop")
+                break
+
+            log.debug(f"Request {request_count}: {len(articles)} articles (first ID: {first_id})")
 
             for art in articles:
+                seen_ids.add(art["id"])
                 title = art.get("title", "")
                 if "[" in title and "]" in title:
                     start = title.rfind("[")
@@ -229,16 +237,14 @@ def load_all_intercom_articles() -> dict[str, int]:
                     if start < end:
                         task_id = title[start+1:end]
                         task_id_to_article_id[task_id] = art["id"]
-                        total_loaded += 1
 
-            # Следующий курсор
             params["starting_after"] = articles[-1]["id"]
 
         except Exception as e:
             log.error(f"Error loading articles: {e}")
             break
 
-    log.info(f"Loaded {total_loaded} articles with task_id into memory")
+    log.info(f"Loaded {len(task_id_to_article_id)} articles with task_id into memory")
     return task_id_to_article_id
 
 # ==============================
@@ -277,7 +283,7 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
         return None
 
 # ==============================
-# 10. ОЧИСТКА ДУБЛЕЙ (starting_after + остановка при пустом)
+# 10. ОЧИСТКА ДУБЛЕЙ (seen_ids)
 # ==============================
 def cleanup_duplicates():
     if DRY_RUN:
@@ -286,6 +292,7 @@ def cleanup_duplicates():
 
     log.info("Starting duplicate cleanup...")
     articles = []
+    seen_ids = set()
     url = f"{INTERCOM_BASE}/internal_articles"
     params = {"per_page": 100}
 
@@ -301,11 +308,16 @@ def cleanup_duplicates():
 
         data = r.json()
         batch = data.get("data", [])
-        articles.extend(batch)
-
         if not batch:
             break
 
+        first_id = batch[0]["id"]
+        if first_id in seen_ids:
+            log.warning(f"Duplicate ID {first_id} in cleanup — stopping")
+            break
+
+        articles.extend(batch)
+        seen_ids.update(art["id"] for art in batch)
         params["starting_after"] = batch[-1]["id"]
 
     title_to_ids = {}
@@ -329,7 +341,7 @@ def cleanup_duplicates():
     log.info(f"Cleanup complete — removed {deleted} duplicates")
 
 # ==============================
-# 11. ПЕРЕНОС В КОРЕНЬ (starting_after + остановка при пустом)
+# 11. ПЕРЕНОС В КОРЕНЬ (seen_ids)
 # ==============================
 def move_all_to_root():
     if DRY_RUN:
@@ -337,6 +349,7 @@ def move_all_to_root():
         return
 
     log.info("Moving all articles to root...")
+    seen_ids = set()
     url = f"{INTERCOM_BASE}/internal_articles"
     params = {"per_page": 100}
 
@@ -352,6 +365,13 @@ def move_all_to_root():
 
         data = r.json()
         batch = data.get("data", [])
+        if not batch:
+            break
+
+        first_id = batch[0]["id"]
+        if first_id in seen_ids:
+            log.warning(f"Duplicate ID {first_id} in move_to_root — stopping")
+            break
 
         for art in batch:
             if art.get("parent_id"):
@@ -359,9 +379,7 @@ def move_all_to_root():
                 if put_r.status_code == 200:
                     log.info(f"Moved to root: {art['title']} (ID: {art['id']})")
 
-        if not batch:
-            break
-
+        seen_ids.update(art["id"] for art in batch)
         params["starting_after"] = batch[-1]["id"]
 
     log.info("All articles moved to root")
@@ -377,10 +395,8 @@ def main():
         move_all_to_root()
         return
 
-    # === ШАГ 1: Загружаем ВСЕ статьи из Intercom ===
     intercom_map = load_all_intercom_articles()
 
-    # === ШАГ 2: Получаем задачи из ClickUp ===
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
     updated_after = datetime.fromisoformat(last_sync_iso) if last_sync_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
