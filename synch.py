@@ -232,9 +232,31 @@ def load_all_articles():
 # ==============================
 # Синхронизация одной статьи
 # ==============================
+# Добавь эту функцию где-нибудь выше (например, после утилит или перед sync_article)
+def retry_request(method, url, json=None, max_retries=5, backoff=2):
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = method(url, json=json)
+            if r.status_code in (500, 502, 503, 504):
+                wait = backoff ** attempt  # 2, 4, 8, 16, 32...
+                log.warning(f"Серверная ошибка {r.status_code}, попытка {attempt}/{max_retries}, ждём {wait}с")
+                time.sleep(wait)
+                continue
+            return r
+        except requests.exceptions.RequestException as e:
+            log.warning(f"Сетевая ошибка на попытке {attempt}: {e}")
+            if attempt == max_retries:
+                raise
+            time.sleep(backoff ** attempt)
+    log.error(f"Не удалось выполнить запрос после {max_retries} попыток: {url}")
+    return None
+
+
+# Обновлённая функция sync_article (замени полностью)
 def sync_article(task, article_map):
     task_id = task["id"]
-    title = f"{task.get('name', '(Без названия)')} [{task_id}]"[:255]
+    title_base = task.get("name") or "(Без названия)"
+    title = f"{title_base} [{task_id}]"[:255]
     body = task_to_html(task)[:50000]
 
     payload = {
@@ -248,21 +270,24 @@ def sync_article(task, article_map):
     if task_id in article_map:
         article_id = article_map[task_id]
 
-        # Проверяем, изменилось ли содержимое
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles/{article_id}")
-        if r.status_code == 200:
-            curr = r.json()
+        # Проверяем изменения (GET)
+        r_get = ic.get(f"{INTERCOM_BASE}/internal_articles/{article_id}")
+        if r_get.status_code == 200:
+            curr = r_get.json()
             if curr.get("title") == title and curr.get("body") == body:
                 log.info(f"Пропуск (без изменений): {title} (ID {article_id})")
                 return article_id
 
         log.info(f"Обновление: {title} (ID {article_id})")
-        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
-        while rate_limit_sleep(r):
-            r = ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
+        
+        # PUT с retry
+        r = retry_request(ic.put, f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
+        if r is None:
+            log.error(f"Не удалось обновить статью после всех попыток: {title}")
+            return None
 
         if r.status_code in (200, 201):
-            log.info(f"Обновлено успешно: {title}")
+            log.info(f"Обновлено успешно: {title} (ID {article_id})")
             return article_id
         else:
             log.error(f"Ошибка обновления: {r.status_code} {r.text}")
@@ -270,9 +295,12 @@ def sync_article(task, article_map):
 
     else:
         log.info(f"Создание: {title}")
-        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
-        while rate_limit_sleep(r):
-            r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+        
+        # POST с retry
+        r = retry_request(ic.post, f"{INTERCOM_BASE}/internal_articles", json=payload)
+        if r is None:
+            log.error(f"Не удалось создать статью после всех попыток: {title}")
+            return None
 
         if r.status_code in (200, 201):
             new_id = r.json().get("id")
