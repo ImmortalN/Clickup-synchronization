@@ -25,7 +25,7 @@ INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")
 INTERCOM_OWNER_ID = os.getenv("INTERCOM_OWNER_ID")
 INTERCOM_AUTHOR_ID = os.getenv("INTERCOM_AUTHOR_ID")
 
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"  # Установлен по умолчанию true, чтобы не переносились реальные гайды
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
 DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
@@ -179,19 +179,21 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ЧЕРЕЗ pages.next
+# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ЧЕРЕЗ page-based pagination
 # ==============================
 def load_all_articles_with_pages() -> dict[str, int]:
-    log.info("Loading ALL Intercom articles using cursor-based pagination...")
+    log.info("Loading ALL Intercom articles using page-based pagination...")
     task_id_to_article_id = {}
     base_url = f"{INTERCOM_BASE}/internal_articles"
-    params = {"per_page": 100}
+    per_page = 100
     page_num = 1
     total_loaded = 0
 
     while True:
+        params = {"page": page_num, "per_page": per_page}
+        log.debug(f"Requesting page {page_num} with params: {params}")
+
         try:
-            log.debug(f"Requesting page {page_num} with params: {params}")
             r = ic.get(base_url, params=params)
             while _rate_limit_sleep(r):
                 time.sleep(2)
@@ -204,9 +206,11 @@ def load_all_articles_with_pages() -> dict[str, int]:
             data = r.json()
             log.debug(f"Response structure (page {page_num}): {json.dumps(data, indent=2)}")
 
-            # Articles обычно в data["data"]
             articles = data.get("data", [])
-            log.info(f"Page {page_num}: loaded {len(articles)} articles, total so far: {total_loaded + len(articles)}")
+            page_count = len(articles)
+            total_loaded += page_count
+
+            log.info(f"Page {page_num}: loaded {page_count} articles, total so far: {total_loaded}")
 
             for art in articles:
                 title = art.get("title", "")
@@ -221,37 +225,23 @@ def load_all_articles_with_pages() -> dict[str, int]:
                             task_id_to_article_id[task_id] = art["id"]
                             log.debug(f"Mapped '{task_id}' → article {art['id']}")
 
-            total_loaded += len(articles)
-
-            if not articles:
-                log.info("No more articles — done.")
-                break
-
-            # Pagination: ищем cursor
+            # Проверяем, есть ли ещё страницы
             pages = data.get("pages", {})
-            next_cursor = None
-            if pages:
-                next_obj = pages.get("next", {})
-                if next_obj:
-                    next_cursor = next_obj.get("cursor")
-                    log.debug(f"Found next cursor: {next_cursor}")
-
-            if not next_cursor:
-                log.info("No next cursor found — pagination complete.")
+            total_pages = pages.get("total_pages", 1)
+            if page_num >= total_pages or page_count == 0:
+                log.info(f"Reached end: page {page_num} of {total_pages}")
                 break
 
-            # Для следующей страницы
-            params = {"per_page": 100, "cursor": next_cursor}
             page_num += 1
-            time.sleep(1.5)  # пауза от rate limit
+            time.sleep(1.5)  # защита от rate limit
 
         except Exception as e:
             log.error(f"Error on page {page_num}: {e}")
             break
 
-    log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id (from {total_loaded} total fetched)")
+    log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id (total fetched: {total_loaded})")
     if len(task_id_to_article_id) == 0:
-        log.warning("No articles with [task_id] format found in Intercom — check titles or pagination")
+        log.warning("No articles with [task_id] format found — check titles")
     return task_id_to_article_id
 
 # ==============================
@@ -311,7 +301,7 @@ def sync_internal_article(task: dict, intercom_map: dict) -> int | None:
 # 10. MAIN
 # ==============================
 def main():
-    # 1. Загружаем ВСЕ статьи через pages.next
+    # 1. Загружаем ВСЕ статьи через page-based pagination
     intercom_map = load_all_articles_with_pages()
 
     # 2. Синхронизация
@@ -346,5 +336,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
