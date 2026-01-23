@@ -184,8 +184,8 @@ def task_to_html(task: dict) -> str:
 def load_all_articles_with_pages() -> dict[str, int]:
     log.info("Loading ALL Intercom articles using pages.next...")
     task_id_to_article_id = {}
-    url = f"{INTERCOM_BASE}/internal_articles/search"
-    params = {"per_page": 150}  # Увеличили до 150 для эффективности, предполагая, что API поддерживает
+    url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}  # Вернули к 100, как в исходном коде
     page_num = 1
 
     while url:
@@ -203,7 +203,7 @@ def load_all_articles_with_pages() -> dict[str, int]:
             # Добавляем логирование структуры ответа для отладки
             log.debug(f"Response structure: {json.dumps(data, indent=2)}")
 
-            articles = data.get("data", {}).get("internal_articles", [])
+            articles = data.get("data", [])  # Изменили на data, как в старых логах (не data.internal_articles)
             log.debug(f"Page {page_num}: loaded {len(articles)} articles, total so far: {len(task_id_to_article_id)}")
 
             for art in articles:
@@ -326,7 +326,8 @@ def main():
     for task in fetch_clickup_tasks(updated_after):
         result_id = sync_internal_article(task, intercom_map)
         if result_id:
-            if task["id"] in intercom_map:
+            # Корректировка счёта: если был в map изначально — update, иначе create
+            if task["id"] in intercom_map and result_id == intercom_map[task["id"]]:
                 updated += 1
             else:
                 created += 1
