@@ -209,35 +209,43 @@ def load_all_articles_with_pages() -> dict[str, int]:
                     start = title.rfind("[")
                     end = title.rfind("]")
                     if start < end:
-                        task_id = title[start+1:end].strip()
-                        if task_id.isdigit():  # Добавляем проверку, чтобы избежать malformed task_id
+                        raw_task_id = title[start+1:end].strip()
+                        # Здесь можно добавить дополнительные проверки, если нужно
+                        # Например: if len(raw_task_id) < 6 or len(raw_task_id) > 12: continue
+                        task_id = raw_task_id  # ← просто берём как есть, без isdigit()
+                        
+                        if task_id:  # не пустой
+                            if task_id in task_id_to_article_id:
+                                log.warning(f"Duplicate task_id '{task_id}' found in Intercom (different articles?)")
                             task_id_to_article_id[task_id] = art["id"]
+                            log.debug(f"Mapped task_id '{task_id}' → article {art['id']}")
                         else:
-                            log.warning(f"Malformed task_id in title '{title}': '{task_id}' — skipping")
+                            log.warning(f"Empty task_id extracted from title '{title}' — skipping")
                     else:
                         log.warning(f"Malformed brackets in title '{title}' — skipping")
                 else:
-                    log.debug(f"No task_id in title '{title}' — skipping")
+                    log.debug(f"No [task_id] in title '{title}' — skipping")
 
-            # КЛЮЧ: pages.next
             pages = data.get("pages", {})
             next_url = pages.get("next")
             if next_url:
                 log.debug(f"Moving to next page: {next_url}")
                 url = next_url
-                params = {}  # next_url уже содержит параметры
+                params = {}
             else:
                 log.info("No more pages — done.")
                 url = None
 
             page_num += 1
-            time.sleep(1)  # Добавляем небольшую задержку между страницами для избежания rate limits
+            time.sleep(1)  # защита от rate limit
 
         except Exception as e:
             log.error(f"Error loading page {page_num}: {e}")
             break
 
     log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id")
+    if len(task_id_to_article_id) == 0:
+        log.warning("No articles with [task_id] format found in Intercom — check titles or pagination")
     return task_id_to_article_id
 
 # ==============================
