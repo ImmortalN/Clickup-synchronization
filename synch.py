@@ -184,8 +184,8 @@ def task_to_html(task: dict) -> str:
 def load_all_articles_with_pages() -> dict[str, int]:
     log.info("Loading ALL Intercom articles using pages.next...")
     task_id_to_article_id = {}
-    url = f"{INTERCOM_BASE}/internal_articles"
-    params = {"per_page": 100}
+    url = f"{INTERCOM_BASE}/internal_articles/search"
+    params = {"per_page": 150}  # Увеличили до 150 для эффективности, предполагая, что API поддерживает
     page_num = 1
 
     while url:
@@ -200,7 +200,10 @@ def load_all_articles_with_pages() -> dict[str, int]:
                 break
 
             data = r.json()
-            articles = data.get("data", [])
+            # Добавляем логирование структуры ответа для отладки
+            log.debug(f"Response structure: {json.dumps(data, indent=2)}")
+
+            articles = data.get("data", {}).get("internal_articles", [])
             log.debug(f"Page {page_num}: loaded {len(articles)} articles, total so far: {len(task_id_to_article_id)}")
 
             for art in articles:
@@ -210,11 +213,9 @@ def load_all_articles_with_pages() -> dict[str, int]:
                     end = title.rfind("]")
                     if start < end:
                         raw_task_id = title[start+1:end].strip()
-                        # Здесь можно добавить дополнительные проверки, если нужно
-                        # Например: if len(raw_task_id) < 6 or len(raw_task_id) > 12: continue
-                        task_id = raw_task_id  # ← просто берём как есть, без isdigit()
+                        task_id = raw_task_id  # Берём как есть
                         
-                        if task_id:  # не пустой
+                        if task_id:
                             if task_id in task_id_to_article_id:
                                 log.warning(f"Duplicate task_id '{task_id}' found in Intercom (different articles?)")
                             task_id_to_article_id[task_id] = art["id"]
@@ -226,12 +227,13 @@ def load_all_articles_with_pages() -> dict[str, int]:
                 else:
                     log.debug(f"No [task_id] in title '{title}' — skipping")
 
+            # КЛЮЧ: pages.next
             pages = data.get("pages", {})
             next_url = pages.get("next")
             if next_url:
                 log.debug(f"Moving to next page: {next_url}")
                 url = next_url
-                params = {}
+                params = {}  # next_url уже содержит параметры
             else:
                 log.info("No more pages — done.")
                 url = None
