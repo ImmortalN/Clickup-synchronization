@@ -182,29 +182,31 @@ def task_to_html(task: dict) -> str:
 # 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ЧЕРЕЗ pages.next
 # ==============================
 def load_all_articles_with_pages() -> dict[str, int]:
-    log.info("Loading ALL Intercom articles using pages.next...")
+    log.info("Loading ALL Intercom articles using cursor-based pagination...")
     task_id_to_article_id = {}
-    url = f"{INTERCOM_BASE}/internal_articles"
-    params = {"per_page": 100}  # Вернули к 100, как в исходном коде
+    base_url = f"{INTERCOM_BASE}/internal_articles"
+    params = {"per_page": 100}
     page_num = 1
+    total_loaded = 0
 
-    while url:
+    while True:
         try:
-            r = ic.get(url, params=params)
+            log.debug(f"Requesting page {page_num} with params: {params}")
+            r = ic.get(base_url, params=params)
             while _rate_limit_sleep(r):
                 time.sleep(2)
-                r = ic.get(url, params=params)
+                r = ic.get(base_url, params=params)
 
             if r.status_code != 200:
                 log.error(f"HTTP {r.status_code} at page {page_num}: {r.text}")
                 break
 
             data = r.json()
-            # Добавляем логирование структуры ответа для отладки
-            log.debug(f"Response structure: {json.dumps(data, indent=2)}")
+            log.debug(f"Response structure (page {page_num}): {json.dumps(data, indent=2)}")
 
-            articles = data.get("data", [])  # Изменили на data, как в старых логах (не data.internal_articles)
-            log.debug(f"Page {page_num}: loaded {len(articles)} articles, total so far: {len(task_id_to_article_id)}")
+            # Articles обычно в data["data"]
+            articles = data.get("data", [])
+            log.info(f"Page {page_num}: loaded {len(articles)} articles, total so far: {total_loaded + len(articles)}")
 
             for art in articles:
                 title = art.get("title", "")
@@ -212,42 +214,41 @@ def load_all_articles_with_pages() -> dict[str, int]:
                     start = title.rfind("[")
                     end = title.rfind("]")
                     if start < end:
-                        raw_task_id = title[start+1:end].strip()
-                        task_id = raw_task_id  # Берём как есть
-                        
+                        task_id = title[start+1:end].strip()
                         if task_id:
                             if task_id in task_id_to_article_id:
-                                log.warning(f"Duplicate task_id '{task_id}' found in Intercom (different articles?)")
+                                log.warning(f"Duplicate task_id '{task_id}' → possible conflict")
                             task_id_to_article_id[task_id] = art["id"]
-                            log.debug(f"Mapped task_id '{task_id}' → article {art['id']}")
-                        else:
-                            log.warning(f"Empty task_id extracted from title '{title}' — skipping")
-                    else:
-                        log.warning(f"Malformed brackets in title '{title}' — skipping")
-                else:
-                    log.debug(f"No [task_id] in title '{title}' — skipping")
+                            log.debug(f"Mapped '{task_id}' → article {art['id']}")
 
-            # КЛЮЧ: pages.next
+            total_loaded += len(articles)
+
+            # Pagination: ищем cursor
             pages = data.get("pages", {})
-            next_url = pages.get("next")
-            if next_url:
-                log.debug(f"Moving to next page: {next_url}")
-                url = next_url
-                params = {}  # next_url уже содержит параметры
-            else:
-                log.info("No more pages — done.")
-                url = None
+            next_cursor = None
+            if pages:
+                next_obj = pages.get("next")
+                if isinstance(next_obj, dict):
+                    next_cursor = next_obj.get("starting_after") or next_obj.get("cursor")
+                elif isinstance(next_obj, str):
+                    next_cursor = next_obj  # на случай, если это просто строка
 
+            if not next_cursor:
+                log.info("No next cursor found — pagination complete.")
+                break
+
+            # Для следующей страницы
+            params = {"per_page": 100, "starting_after": next_cursor}
             page_num += 1
-            time.sleep(1)  # защита от rate limit
+            time.sleep(1.5)  # чуть больше паузы, т.к. много страниц (22)
 
         except Exception as e:
-            log.error(f"Error loading page {page_num}: {e}")
+            log.error(f"Error on page {page_num}: {e}")
             break
 
-    log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id")
-    if len(task_id_to_article_id) == 0:
-        log.warning("No articles with [task_id] format found in Intercom — check titles or pagination")
+    log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id (from {total_loaded} total fetched)")
+    if len(task_id_to_article_id) == 0 and total_loaded > 0:
+        log.warning("Articles fetched but no [task_id] found in titles — check title format")
     return task_id_to_article_id
 
 # ==============================
