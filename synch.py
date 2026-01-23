@@ -1,15 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Синхронизация ClickUp → Intercom (Internal Articles)
-ФИНАЛЬНАЯ ВЕРСИЯ: pages.next — ПОЛНАЯ ПАГИНАЦИЯ БЕЗ ЗАЦИКЛИВАНИЯ
-- Используем pages.next из ответа API
-- Никаких starting_after
-- 2000+ гайдов → 20 страниц → 20 секунд
-- 0 дублей
-"""
-
+```python
 import os
 import time
 import json
@@ -44,6 +33,9 @@ DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 SPACE_ID = "90125205902"
 IGNORED_LIST_IDS = {"901212791461", "901212763746"}
 SYNC_STATE_FILE = ".sync_state.json"
+
+# Для теста: Ограничить количество задач из ClickUp (например, 200)
+MAX_TASKS_FOR_TEST = 200
 
 # ==============================
 # 2. ПРОВЕРКА
@@ -112,25 +104,25 @@ def _rate_limit_sleep(resp: requests.Response) -> bool:
 # ==============================
 def check_team_access(team_id: str):
     r = cu.get(f"https://api.clickup.com/api/v2/team/{team_id}")
-    while _rate_limit_sleep(r): r = cu.get(...)
+    while _rate_limit_sleep(r): r = cu.get(f"https://api.clickup.com/api/v2/team/{team_id}")
     r.raise_for_status()
     log.info(f"Team access OK: {r.json()['team']['name']}")
 
 def fetch_folders(space_id: str):
     r = cu.get(f"https://api.clickup.com/api/v2/space/{space_id}/folder", params={"archived": "false"})
-    while _rate_limit_sleep(r): r = cu.get(...)
+    while _rate_limit_sleep(r): r = cu.get(f"https://api.clickup.com/api/v2/space/{space_id}/folder", params={"archived": "false"})
     r.raise_for_status()
     return r.json().get("folders", [])
 
 def fetch_lists_from_folder(folder_id: str):
     r = cu.get(f"https://api.clickup.com/api/v2/folder/{folder_id}/list", params={"archived": "false"})
-    while _rate_limit_sleep(r): r = cu.get(...)
+    while _rate_limit_sleep(r): r = cu.get(f"https://api.clickup.com/api/v2/folder/{folder_id}/list", params={"archived": "false"})
     r.raise_for_status()
     return r.json().get("lists", [])
 
 def fetch_folderless_lists(space_id: str):
     r = cu.get(f"https://api.clickup.com/api/v2/space/{space_id}/list", params={"archived": "false"})
-    while _rate_limit_sleep(r): r = cu.get(...)
+    while _rate_limit_sleep(r): r = cu.get(f"https://api.clickup.com/api/v2/space/{space_id}/list", params={"archived": "false"})
     r.raise_for_status()
     return r.json().get("lists", [])
 
@@ -147,7 +139,7 @@ def fetch_tasks_from_list(list_id: str, updated_after: datetime):
         if CLICKUP_ONLY_OPEN: params["statuses[]"] = ["to do", "in progress"]
 
         r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
-        while _rate_limit_sleep(r): r = cu.get(...)
+        while _rate_limit_sleep(r): r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
         r.raise_for_status()
         batch = r.json().get("tasks", [])
         if not batch: break
@@ -157,13 +149,24 @@ def fetch_tasks_from_list(list_id: str, updated_after: datetime):
         page += 1
 
 def fetch_clickup_tasks(updated_after: datetime):
+    task_count = 0
     for folder in fetch_folders(SPACE_ID):
         for lst in fetch_lists_from_folder(folder["id"]):
             if lst["id"] in IGNORED_LIST_IDS: continue
-            yield from fetch_tasks_from_list(lst["id"], updated_after)
+            for task in fetch_tasks_from_list(lst["id"], updated_after):
+                if task_count >= MAX_TASKS_FOR_TEST:
+                    log.info(f"Reached test limit of {MAX_TASKS_FOR_TEST} tasks — stopping fetch.")
+                    return
+                yield task
+                task_count += 1
     for lst in fetch_folderless_lists(SPACE_ID):
         if lst["id"] in IGNORED_LIST_IDS: continue
-        yield from fetch_tasks_from_list(lst["id"], updated_after)
+        for task in fetch_tasks_from_list(lst["id"], updated_after):
+            if task_count >= MAX_TASKS_FOR_TEST:
+                log.info(f"Reached test limit of {MAX_TASKS_FOR_TEST} tasks — stopping fetch.")
+                return
+            yield task
+            task_count += 1
 
 # ==============================
 # 7. HTML
@@ -194,12 +197,12 @@ def load_all_articles_with_pages() -> dict[str, int]:
                 r = ic.get(url, params=params)
 
             if r.status_code != 200:
-                log.error(f"HTTP {r.status_code} at page {page_num}")
+                log.error(f"HTTP {r.status_code} at page {page_num}: {r.text}")
                 break
 
             data = r.json()
             articles = data.get("data", [])
-            log.debug(f"Page {page_num}: {len(articles)} articles")
+            log.debug(f"Page {page_num}: loaded {len(articles)} articles, total so far: {len(task_id_to_article_id)}")
 
             for art in articles:
                 title = art.get("title", "")
@@ -207,8 +210,15 @@ def load_all_articles_with_pages() -> dict[str, int]:
                     start = title.rfind("[")
                     end = title.rfind("]")
                     if start < end:
-                        task_id = title[start+1:end]
-                        task_id_to_article_id[task_id] = art["id"]
+                        task_id = title[start+1:end].strip()
+                        if task_id.isdigit():  # Добавляем проверку, чтобы избежать malformed task_id
+                            task_id_to_article_id[task_id] = art["id"]
+                        else:
+                            log.warning(f"Malformed task_id in title '{title}': '{task_id}' — skipping")
+                    else:
+                        log.warning(f"Malformed brackets in title '{title}' — skipping")
+                else:
+                    log.debug(f"No task_id in title '{title}' — skipping")
 
             # КЛЮЧ: pages.next
             pages = data.get("pages", {})
@@ -222,6 +232,7 @@ def load_all_articles_with_pages() -> dict[str, int]:
                 url = None
 
             page_num += 1
+            time.sleep(1)  # Добавляем небольшую задержку между страницами для избежания rate limits
 
         except Exception as e:
             log.error(f"Error loading page {page_num}: {e}")
@@ -231,17 +242,13 @@ def load_all_articles_with_pages() -> dict[str, int]:
     return task_id_to_article_id
 
 # ==============================
-# 9. СОЗДАНИЕ СТАТЬИ
+# 9. СОЗДАНИЕ ИЛИ ОБНОВЛЕНИЕ СТАТЬИ
 # ==============================
-def create_internal_article(task: dict, intercom_map: dict) -> int | None:
+def sync_internal_article(task: dict, intercom_map: dict) -> int | None:
     task_id = task["id"]
     title_base = task.get("name") or "(Без названия)"
     title = f"{title_base} [{task_id}]"[:255]
     body = task_to_html(task)[:50_000]
-
-    if task_id in intercom_map:
-        log.info(f"SKIPPED: '{title_base}' (exists as ID {intercom_map[task_id]})")
-        return intercom_map[task_id]
 
     payload = {
         "title": title,
@@ -251,23 +258,41 @@ def create_internal_article(task: dict, intercom_map: dict) -> int | None:
         "locale": "en",
     }
 
-    if DRY_RUN:
-        log.info(f"[DRY_RUN] Would create: {title}")
-        return None
+    if task_id in intercom_map:
+        art_id = intercom_map[task_id]
+        if DRY_RUN:
+            log.info(f"[DRY_RUN] Would update: {title} (ID {art_id})")
+            return art_id
 
-    log.info(f"Creating: {title}")
-    r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
-    while _rate_limit_sleep(r):
-        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+        log.info(f"Updating: {title} (ID {art_id})")
+        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art_id}", json=payload)
+        while _rate_limit_sleep(r):
+            r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art_id}", json=payload)
 
-    if r.status_code in (200, 201):
-        art_id = r.json().get("id")
-        log.info(f"Created: {title} (ID {art_id})")
-        intercom_map[task_id] = art_id
-        return art_id
+        if r.status_code in (200, 201):
+            log.info(f"Updated: {title} (ID {art_id})")
+            return art_id
+        else:
+            log.error(f"Update failed: {r.status_code} {r.text}")
+            return None
     else:
-        log.error(f"Create failed: {r.status_code} {r.text}")
-        return None
+        if DRY_RUN:
+            log.info(f"[DRY_RUN] Would create: {title}")
+            return None
+
+        log.info(f"Creating: {title}")
+        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+        while _rate_limit_sleep(r):
+            r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+
+        if r.status_code in (200, 201):
+            art_id = r.json().get("id")
+            log.info(f"Created: {title} (ID {art_id})")
+            intercom_map[task_id] = art_id
+            return art_id
+        else:
+            log.error(f"Create failed: {r.status_code} {r.text}")
+            return None
 
 # ==============================
 # 10. MAIN
@@ -288,11 +313,14 @@ def main():
         log.error(f"Team check failed: {e}")
         return
 
-    created = skipped = 0
+    created = updated = skipped = 0
     for task in fetch_clickup_tasks(updated_after):
-        new_id = create_internal_article(task, intercom_map)
-        if new_id or DRY_RUN:
-            created += 1
+        result_id = sync_internal_article(task, intercom_map)
+        if result_id:
+            if task["id"] in intercom_map:
+                updated += 1
+            else:
+                created += 1
         else:
             skipped += 1
 
@@ -300,7 +328,8 @@ def main():
     state["last_sync_iso"] = now_iso
     _save_state(state)
 
-    log.info(f"Sync complete — Created: {created}, Skipped: {skipped}, Last sync: {now_iso}")
+    log.info(f"Sync complete — Created: {created}, Updated: {updated}, Skipped: {skipped}, Last sync: {now_iso}")
 
 if __name__ == "__main__":
     main()
+```
