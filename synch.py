@@ -223,32 +223,35 @@ def load_all_articles_with_pages() -> dict[str, int]:
 
             total_loaded += len(articles)
 
+            if not articles:
+                log.info("No more articles — done.")
+                break
+
             # Pagination: ищем cursor
             pages = data.get("pages", {})
             next_cursor = None
             if pages:
-                next_obj = pages.get("next")
-                if isinstance(next_obj, dict):
-                    next_cursor = next_obj.get("starting_after") or next_obj.get("cursor")
-                elif isinstance(next_obj, str):
-                    next_cursor = next_obj  # на случай, если это просто строка
+                next_obj = pages.get("next", {})
+                if next_obj:
+                    next_cursor = next_obj.get("cursor")
+                    log.debug(f"Found next cursor: {next_cursor}")
 
             if not next_cursor:
                 log.info("No next cursor found — pagination complete.")
                 break
 
             # Для следующей страницы
-            params = {"per_page": 100, "starting_after": next_cursor}
+            params = {"per_page": 100, "cursor": next_cursor}
             page_num += 1
-            time.sleep(1.5)  # чуть больше паузы, т.к. много страниц (22)
+            time.sleep(1.5)  # пауза от rate limit
 
         except Exception as e:
             log.error(f"Error on page {page_num}: {e}")
             break
 
     log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id (from {total_loaded} total fetched)")
-    if len(task_id_to_article_id) == 0 and total_loaded > 0:
-        log.warning("Articles fetched but no [task_id] found in titles — check title format")
+    if len(task_id_to_article_id) == 0:
+        log.warning("No articles with [task_id] format found in Intercom — check titles or pagination")
     return task_id_to_article_id
 
 # ==============================
