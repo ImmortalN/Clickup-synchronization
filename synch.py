@@ -21,11 +21,11 @@ LOOKBACK_HOURS = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
 
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
-INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "Unstable")
+INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "2.14")  # Стабильная версия
 INTERCOM_OWNER_ID = os.getenv("INTERCOM_OWNER_ID")
 INTERCOM_AUTHOR_ID = os.getenv("INTERCOM_AUTHOR_ID")
 
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"  # Установлен по умолчанию true, чтобы не переносились реальные гайды
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 FETCH_ALL = os.getenv("FETCH_ALL", "false").lower() == "true"
 DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "false").lower() == "true"
 
@@ -33,8 +33,8 @@ SPACE_ID = "90125205902"
 IGNORED_LIST_IDS = {"901212791461", "901212763746"}
 SYNC_STATE_FILE = ".sync_state.json"
 
-# Для теста: Ограничить количество задач из ClickUp (например, 200)
-MAX_TASKS_FOR_TEST = 200
+# Убери или увеличь для полного запуска
+MAX_TASKS_FOR_TEST = 200  # ← можно закомментировать или поставить 0 для полного
 
 # ==============================
 # 2. ПРОВЕРКА
@@ -153,7 +153,7 @@ def fetch_clickup_tasks(updated_after: datetime):
         for lst in fetch_lists_from_folder(folder["id"]):
             if lst["id"] in IGNORED_LIST_IDS: continue
             for task in fetch_tasks_from_list(lst["id"], updated_after):
-                if task_count >= MAX_TASKS_FOR_TEST:
+                if MAX_TASKS_FOR_TEST and task_count >= MAX_TASKS_FOR_TEST:
                     log.info(f"Reached test limit of {MAX_TASKS_FOR_TEST} tasks — stopping fetch.")
                     return
                 yield task
@@ -161,7 +161,7 @@ def fetch_clickup_tasks(updated_after: datetime):
     for lst in fetch_folderless_lists(SPACE_ID):
         if lst["id"] in IGNORED_LIST_IDS: continue
         for task in fetch_tasks_from_list(lst["id"], updated_after):
-            if task_count >= MAX_TASKS_FOR_TEST:
+            if MAX_TASKS_FOR_TEST and task_count >= MAX_TASKS_FOR_TEST:
                 log.info(f"Reached test limit of {MAX_TASKS_FOR_TEST} tasks — stopping fetch.")
                 return
             yield task
@@ -179,7 +179,7 @@ def task_to_html(task: dict) -> str:
     return f"<h1>{html.escape(name)}</h1>{body}"
 
 # ==============================
-# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ ЧЕРЕЗ page-based pagination
+# 8. ЗАГРУЗКА ВСЕХ СТАТЕЙ
 # ==============================
 def load_all_articles_with_pages() -> dict[str, int]:
     log.info("Loading ALL Intercom articles using page-based pagination...")
@@ -204,8 +204,8 @@ def load_all_articles_with_pages() -> dict[str, int]:
                 break
 
             data = r.json()
-            log.debug(f"Response structure (page {page_num}): {json.dumps(data, indent=2)}")
 
+            # НЕ выводим полный JSON — только summary
             articles = data.get("data", [])
             page_count = len(articles)
             total_loaded += page_count
@@ -223,9 +223,7 @@ def load_all_articles_with_pages() -> dict[str, int]:
                             if task_id in task_id_to_article_id:
                                 log.warning(f"Duplicate task_id '{task_id}' → possible conflict")
                             task_id_to_article_id[task_id] = art["id"]
-                            log.debug(f"Mapped '{task_id}' → article {art['id']}")
 
-            # Проверяем, есть ли ещё страницы
             pages = data.get("pages", {})
             total_pages = pages.get("total_pages", 1)
             if page_num >= total_pages or page_count == 0:
@@ -233,19 +231,17 @@ def load_all_articles_with_pages() -> dict[str, int]:
                 break
 
             page_num += 1
-            time.sleep(1.5)  # защита от rate limit
+            time.sleep(1.5)
 
         except Exception as e:
             log.error(f"Error on page {page_num}: {e}")
             break
 
     log.info(f"Successfully loaded {len(task_id_to_article_id)} articles with task_id (total fetched: {total_loaded})")
-    if len(task_id_to_article_id) == 0:
-        log.warning("No articles with [task_id] format found — check titles")
     return task_id_to_article_id
 
 # ==============================
-# 9. СОЗДАНИЕ ИЛИ ОБНОВЛЕНИЕ СТАТЬИ
+# 9. СОЗДАНИЕ / ОБНОВЛЕНИЕ
 # ==============================
 def sync_internal_article(task: dict, intercom_map: dict) -> int | None:
     task_id = task["id"]
@@ -263,9 +259,14 @@ def sync_internal_article(task: dict, intercom_map: dict) -> int | None:
 
     if task_id in intercom_map:
         art_id = intercom_map[task_id]
-        if DRY_RUN:
-            log.info(f"[DRY_RUN] Would update: {title} (ID {art_id})")
-            return art_id
+
+        # Проверяем, изменилось ли содержимое
+        r_get = ic.get(f"{INTERCOM_BASE}/internal_articles/{art_id}")
+        if r_get.status_code == 200:
+            current = r_get.json()
+            if current.get("title") == title and current.get("body") == body:
+                log.info(f"SKIPPED (no changes): {title} (ID {art_id})")
+                return art_id
 
         log.info(f"Updating: {title} (ID {art_id})")
         r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art_id}", json=payload)
@@ -273,16 +274,12 @@ def sync_internal_article(task: dict, intercom_map: dict) -> int | None:
             r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art_id}", json=payload)
 
         if r.status_code in (200, 201):
-            log.info(f"Updated: {title} (ID {art_id})")
+            log.info(f"Updated successfully: {title} (ID {art_id})")
             return art_id
         else:
             log.error(f"Update failed: {r.status_code} {r.text}")
             return None
     else:
-        if DRY_RUN:
-            log.info(f"[DRY_RUN] Would create: {title}")
-            return None
-
         log.info(f"Creating: {title}")
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
         while _rate_limit_sleep(r):
@@ -290,7 +287,7 @@ def sync_internal_article(task: dict, intercom_map: dict) -> int | None:
 
         if r.status_code in (200, 201):
             art_id = r.json().get("id")
-            log.info(f"Created: {title} (ID {art_id})")
+            log.info(f"Created successfully: {title} (ID {art_id})")
             intercom_map[task_id] = art_id
             return art_id
         else:
@@ -301,10 +298,8 @@ def sync_internal_article(task: dict, intercom_map: dict) -> int | None:
 # 10. MAIN
 # ==============================
 def main():
-    # 1. Загружаем ВСЕ статьи через page-based pagination
     intercom_map = load_all_articles_with_pages()
 
-    # 2. Синхронизация
     state = _load_state()
     last_sync_iso = state.get("last_sync_iso")
     updated_after = datetime.fromisoformat(last_sync_iso) if last_sync_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
@@ -320,7 +315,6 @@ def main():
     for task in fetch_clickup_tasks(updated_after):
         result_id = sync_internal_article(task, intercom_map)
         if result_id:
-            # Корректировка счёта: если был в map изначально — update, иначе create
             if task["id"] in intercom_map and result_id == intercom_map[task["id"]]:
                 updated += 1
             else:
