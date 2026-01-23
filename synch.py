@@ -35,7 +35,7 @@ def rate_limit_sleep(resp):
 
 def test_pagination():
     base_url = f"{INTERCOM_BASE}/internal_articles"
-    params = {"per_page": 100}
+    params = {"per_page": 25}
     page_num = 1
     total_articles = 0
 
