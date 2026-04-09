@@ -52,11 +52,17 @@ def process_image_links(text: str) -> str:
         url = match.group(0).strip()
         original = url
 
-        # ==================== MONOSNAP (Твоя схема) ====================
-        if "monosnap.ai/file/" in url and "api.monosnap.ai" not in url:
+        # ==================== MONOSNAP ====================
+        if "monosnap.ai/file/" in url:
             img_id = url.split('/')[-1]
-            direct = f"https://api.monosnap.ai/file/download?id={img_id}"
-            return f'<img src="{direct}" style="max-width:100%;">'
+            api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
+            try:
+                r = requests.get(api_url, timeout=10, allow_redirects=True)
+                if r.status_code == 200:
+                    return f'<img src="{r.url}" style="max-width:100%;">'
+            except:
+                pass
+            return original
 
         # ==================== SNIPBOARD ====================
         if "snipboard.io/" in url:
@@ -70,7 +76,7 @@ def process_image_links(text: str) -> str:
             direct = f"https://icecream.me/uploads/{img_id}.png"
             return f'<img src="{direct}" style="max-width:100%;">'
 
-        # ==================== IMGUR (Парсинг через og:image) ====================
+        # ==================== IMGUR ====================
         if "imgur.com/" in url and "i.imgur.com" not in url:
             try:
                 r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
@@ -80,11 +86,10 @@ def process_image_links(text: str) -> str:
                     if meta_img:
                         src = meta_img['content'].split("?")[0]
                         return f'<img src="{src}" style="max-width:100%;">'
-            except Exception as e:
-                log.debug(f"Ошибка парсинга Imgur: {e}")
+            except: pass
             return original
 
-        # ==================== PRNT.SC / LIGHTSHOT ====================
+        # ==================== PRNT.SC ====================
         if "prnt.sc/" in url or "prntscr.com/" in url:
             try:
                 r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
@@ -95,16 +100,14 @@ def process_image_links(text: str) -> str:
                         src = img['src']
                         if src.startswith('//'): src = 'https:' + src
                         return f'<img src="{src}" style="max-width:100%;">'
-            except Exception as e:
-                log.debug(f"Ошибка парсинга Prnt.sc: {e}")
+            except: pass
             return original
 
-        # ==================== TPPR.ME (Защита от ошибки 400) ====================
+        # ==================== TPPR.ME ====================
         if "tppr.me/" in url:
-            # Оставляем ссылкой, так как Intercom не любит их Amazon S3 хранилище
             return f'<a href="{url}">{url}</a>'
 
-        # GitHub и прочие прямые ссылки
+        # GitHub и прочие прямые
         if "user-images.githubusercontent.com" in url or re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
             return f'<img src="{url}" style="max-width:100%;">'
 
