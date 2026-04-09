@@ -51,33 +51,52 @@ def process_image_links(text: str) -> str:
         url = match.group(0).strip()
         original = url
 
-        # ==================== MONOSNAP ====================
+        # ==================== MONOSNAP (Твоя схема) ====================
         if "monosnap.ai/file/" in url and "api.monosnap.ai" not in url:
             img_id = url.split('/')[-1]
+            # Превращаем в прямую ссылку через их API
             direct = f"https://api.monosnap.ai/file/download?id={img_id}"
             return f'<img src="{direct}" style="max-width:100%;">'
 
         # ==================== SNIPBOARD ====================
         if "snipboard.io/" in url:
             direct = url.replace("https://snipboard.io/", "https://i.snipboard.io/")
+            # Добавляем .jpg если его нет в конце, snipboard это любит
+            if not direct.endswith('.jpg'): direct += ".jpg"
             return f'<img src="{direct}" style="max-width:100%;">'
 
         # ==================== ICECREAM ====================
         if "icecream.me/" in url and "/uploads/" not in url:
-            direct = f"https://icecream.me/uploads/{url.split('/')[-1]}.png"
+            img_id = url.split('/')[-1]
+            direct = f"https://icecream.me/uploads/{img_id}.png"
             return f'<img src="{direct}" style="max-width:100%;">'
 
-        # ==================== IMGUR ====================
+        # ==================== TPPR.ME (Парсинг страницы) ====================
+        if "tppr.me/" in url:
+            try:
+                r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'lxml')
+                    # Ищем картинку в их основном контейнере
+                    img = soup.find('img', class_=re.compile(r'screenshot')) or soup.find('meta', property="og:image")
+                    src = img.get('src') or img.get('content')
+                    if src:
+                        return f'<img src="{src}" style="max-width:100%;">'
+            except:
+                pass
+            return original
+
+        # ==================== IMGUR (Улучшенный парсинг) ====================
         if "imgur.com/" in url and "i.imgur.com" not in url:
             try:
                 r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, 'lxml')
-                    img = soup.find('img', src=re.compile(r'i\.imgur\.com'))
-                    if img and img.get('src'):
-                        src = img['src']
-                        if src.startswith('//'):
-                            src = 'https:' + src
+                    # Проверяем мета-теги, Imgur там всегда держит прямую ссылку
+                    meta_img = soup.find('meta', property="og:image")
+                    if meta_img:
+                        src = meta_img['content']
+                        if "?" in src: src = src.split("?")[0] # Убираем лишние параметры
                         return f'<img src="{src}" style="max-width:100%;">'
             except:
                 pass
@@ -92,26 +111,18 @@ def process_image_links(text: str) -> str:
                     img = soup.find('img', class_="no-click") or soup.find('img', id="screenshot-image")
                     if img and img.get('src'):
                         src = img['src']
-                        if src.startswith('//'):
-                            src = 'https:' + src
+                        if src.startswith('//'): src = 'https:' + src
                         return f'<img src="{src}" style="max-width:100%;">'
             except:
                 pass
 
-        # GitHub
-        if "user-images.githubusercontent.com" in url:
-            return f'<img src="{url}" style="max-width:100%;">'
-
-        # tppr.me — пока оставляем как текст (можно потом доработать)
-        if "tppr.me/" in url:
-            return original
-
-        # Остальные прямые
-        if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
+        # GitHub и прочие прямые ссылки
+        if "user-images.githubusercontent.com" in url or re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
             return f'<img src="{url}" style="max-width:100%;">'
 
         return original
 
+    # Регулярка для поиска всех ссылок
     text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
     return text
 
