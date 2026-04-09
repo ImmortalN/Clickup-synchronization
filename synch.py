@@ -53,25 +53,31 @@ def process_image_links(text: str) -> str:
         original = url
 
         # ==================== MONOSNAP ====================
-        # ==================== MONOSNAP ====================
-        if "monosnap.ai/file/" in url:
-            log.debug(f"Найдена ссылка Monosnap: {url}")
+        if "monosnap.ai" in url:
+            # Чистим URL от возможных префиксов API, если они попали в текст
+            clean_url = url.replace("api.monosnap.ai/file/download?id=", "monosnap.ai/file/")
+            log.debug(f"Обработка Monosnap: {clean_url}")
+            
             try:
-                # Заходим на страницу просмотра
-                r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                # Заходим на страницу
+                r = requests.get(clean_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, 'lxml')
-                    # Monosnap прячет прямую ссылку в мета-теге og:image
+                    # Ищем мета-тег с прямой ссылкой на изображение
                     meta_img = soup.find('meta', property="og:image")
                     if meta_img and meta_img.get('content'):
                         direct = meta_img['content']
-                        # Иногда там ссылки типа //store.monosnap.com...
                         if direct.startswith('//'):
                             direct = 'https:' + direct
-                        log.debug(f"Успех! Прямой URL картинки: {direct}")
+                        log.debug(f"--- УСПЕХ MONOSNAP --- Прямой URL: {direct}")
                         return f'<img src="{direct}" style="max-width:100%;">'
+                    else:
+                        log.warning("Мета-тег og:image не найден на странице Monosnap")
+                else:
+                    log.warning(f"Страница Monosnap ответила статусом {r.status_code}")
             except Exception as e:
-                log.error(f"Ошибка парсинга Monosnap: {e}")
+                log.error(f"Ошибка при парсинге Monosnap: {e}")
+            
             return original
             
         # ==================== SNIPBOARD ====================
