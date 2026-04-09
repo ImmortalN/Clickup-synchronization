@@ -86,12 +86,14 @@ def process_image_links(text: str) -> str:
                     soup = BeautifulSoup(r.text, 'lxml')
                     meta_img = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image:src")
                     if meta_img and meta_img.get('content'):
-                        src = meta_img['content']
-                        # ПРИМЕЧАНИЕ: Intercom блокирует и S3, и media.tppr.me.
-                        # Чтобы не получать ошибку 400, возвращаем текстовую ссылку, 
-                        # оформленную так, чтобы она была заметна.
-                        log.warning(f"--- TPPR ПРОПУЩЕН --- Intercom блокирует этот домен. Ссылка: {src}")
-                        return f'<blockquote>📸 <b>Скриншот Tppr:</b> <a href="{url}">{url}</a></blockquote>'
+                        direct_url = meta_img['content']
+                        
+                        # Пропускаем через images.weserv.nl, чтобы Intercom не видел домен tppr
+                        # Это превратит ссылку в нечто вроде: images.weserv.nl/?url=tppr.s3...
+                        proxy_url = f"https://images.weserv.nl/?url={direct_url.replace('https://', '')}"
+                        
+                        log.debug(f"--- УСПЕХ TPPR (PROXY) --- {proxy_url}")
+                        return f'<img src="{proxy_url}" style="max-width:100%;">'
             except Exception as e:
                 log.error(f"Ошибка Tppr: {e}")
             return f'<a href="{url}">{url}</a>'
