@@ -62,15 +62,25 @@ def process_image_links(text: str) -> str:
         url = match.group(0).strip()
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
+        # --- MONOSNAP (поддержка /file/ и /direct/) ---
         if "monosnap.ai" in url:
-            match_id = re.search(r'file/([a-zA-Z0-9]+)', url)
+            log.debug(f"Обработка Monosnap: {url}")
+            # Ищем ID после /file/ или /direct/
+            match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', url)
             if match_id:
-                api_url = f"https://api.monosnap.ai/file/download?id={match_id.group(1)}"
+                img_id = match_id.group(1)
+                api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
+                m_headers = headers.copy()
+                m_headers["Referer"] = url
                 try:
-                    r = requests.get(api_url, timeout=10, headers={"Referer": url}, allow_redirects=True)
+                    # Используем allow_redirects=True, чтобы пройти по цепочке до финальной картинки
+                    r = requests.get(api_url, timeout=15, headers=m_headers, allow_redirects=True)
                     if r.status_code == 200 and "api.monosnap.ai" not in r.url:
+                        log.debug(f"--- УСПЕХ MONOSNAP --- Прямой URL: {r.url}")
                         return f'<img src="{r.url}" style="max-width:100%;">'
-                except: pass
+                except Exception as e:
+                    log.error(f"Ошибка Monosnap: {e}")
+            return original
 
         if "tppr.me/" in url:
             try:
