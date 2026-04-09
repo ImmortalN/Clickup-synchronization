@@ -87,11 +87,11 @@ def process_image_links(text: str) -> str:
                     meta_img = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image:src")
                     if meta_img and meta_img.get('content'):
                         src = meta_img['content']
-                        # Подмена S3 на прокси-домен для Intercom
-                        if "tppr.s3.eu-central-1.amazonaws.com" in src:
-                            src = src.replace("tppr.s3.eu-central-1.amazonaws.com", "media.tppr.me")
-                        log.debug(f"--- УСПЕХ TPPR --- {src}")
-                        return f'<img src="{src}" style="max-width:100%;">'
+                        # ПРИМЕЧАНИЕ: Intercom блокирует и S3, и media.tppr.me.
+                        # Чтобы не получать ошибку 400, возвращаем текстовую ссылку, 
+                        # оформленную так, чтобы она была заметна.
+                        log.warning(f"--- TPPR ПРОПУЩЕН --- Intercom блокирует этот домен. Ссылка: {src}")
+                        return f'<blockquote>📸 <b>Скриншот Tppr:</b> <a href="{url}">{url}</a></blockquote>'
             except Exception as e:
                 log.error(f"Ошибка Tppr: {e}")
             return f'<a href="{url}">{url}</a>'
