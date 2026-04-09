@@ -65,55 +65,46 @@ def process_image_links(text):
     if not text:
         return text
 
-    # Разделяем текст на строки, чтобы ссылки не слипались
-    lines = text.splitlines()
-    processed_lines = []
+    # 1. Сначала убираем Markdown-обертки [link](url), оставляя только URL
+    # Это предотвратит появление лишних скобок и кавычек в Intercom
+    text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
-    for line in lines:
-        new_line = line.strip()
-        if not new_line:
-            processed_lines.append("")
-            continue
+    # Функция-помощник для трансформации URL в прямую картинку
+    def transform_to_direct_url(match):
+        url = match.group(0).strip()
+        
+        # Icecream
+        if "icecream.me/" in url:
+            img_id = url.split('/')[-1]
+            return f'<img src="https://icecream.me/uploads/{img_id}.png" style="max-width:100%;" />'
+        
+        # Imgur Album -> Direct
+        if "imgur.com/a/" in url:
+            img_id = url.split('/')[-1]
+            return f'<img src="https://i.imgur.com/{img_id}.png" style="max-width:100%;" />'
+        
+        # Monosnap
+        if "monosnap.ai/file/" in url:
+            img_id = url.split('/')[-1]
+            return f'<img src="https://api.monosnap.ai/file/download?id={img_id}" style="max-width:100%;" />'
+            
+        # Tppr.me
+        if "tppr.me/" in url:
+            img_id = url.split('/')[-1]
+            return f'<img src="https://media.tppr.me/uploads/{img_id}.jpg" style="max-width:100%;" />'
 
-        # 1. Icecream (Уже работает)
-        if "icecream.me/" in new_line:
-            new_line = re.sub(r'https?://(?:www\.)?icecream\.me/([a-zA-Z0-9]+)', 
-                              r'<img src="https://icecream.me/uploads/\1.png" style="max-width:100%;" />', new_line)
+        # Прямые ссылки на файлы (уже картинки)
+        if re.search(r'\.(png|jpg|jpeg|gif|webp)(\?.*)?$', url.lower()):
+            return f'<img src="{url}" style="max-width:100%;" />'
 
-        # 2. Imgur (Альбомы -> прямая ссылка)
-        # Превращаем https://imgur.com/a/abc в https://i.imgur.com/abc.png
-        elif "imgur.com/a/" in new_line:
-            new_line = re.sub(r'https?://(?:www\.)?imgur\.com/a/([a-zA-Z0-9]+)', 
-                              r'<img src="https://i.imgur.com/\1.png" style="max-width:100%;" />', new_line)
+        # Если это что-то другое (например prnt.sc), оставляем просто ссылкой
+        return url
 
-        # 3. Tppr.me (Topor)
-        # Превращаем https://tppr.me/abc в https://media.tppr.me/uploads/abc.jpg (обычно там такой паттерн)
-        # ВНИМАНИЕ: tppr часто меняет хеши, это "угадывание". Если не сработает - только ручная замена.
-        elif "tppr.me/" in new_line:
-            new_line = re.sub(r'https?://tppr\.me/([a-zA-Z0-9]+)', 
-                              r'<img src="https://media.tppr.me/uploads/\1.jpg" style="max-width:100%;" />', new_line)
+    # 2. Ищем все URL в тексте и прогоняем через трансформатор
+    url_pattern = r'https?://[^\s\)\"\'\>]+'
+    text = re.sub(url_pattern, transform_to_direct_url, text)
 
-        # 4. Snipboard / GitHub / Прямые ссылки на изображения
-        # Если строка - это просто ссылка заканчивающаяся на расширение
-        elif re.search(r'\.(png|jpg|jpeg|gif|webp)$', new_line.lower()):
-            new_line = f'<img src="{new_line}" style="max-width:100%;" />'
-
-        # 5. Monosnap
-        # Превращаем https://monosnap.ai/file/abc в https://api.monosnap.ai/file/download?id=abc
-        elif "monosnap.ai/file/" in new_line:
-            new_line = re.sub(r'https?://monosnap\.ai/file/([a-zA-Z0-9]+)', 
-                              r'<img src="https://api.monosnap.ai/file/download?id=\1" style="max-width:100%;" />', new_line)
-
-        # 6. Lightshot (prnt.sc) - САМЫЙ ПРОБЛЕМНЫЙ
-        # Прямой конвертации нет, сервис блокирует встраивание. Оставляем ссылкой или пробуем:
-        elif "prnt.sc/" in new_line:
-            # Мы не можем угадать прямой URL, так как он на другом домене с другим ID.
-            # Оставляем как есть, чтобы не ломать верстку.
-            pass
-
-        processed_lines.append(new_line)
-
-    return "\n".join(processed_lines)
+    return text
 
 # ==============================
 # УТИЛИТЫ И CLICKUP API (Твой исходный код)
