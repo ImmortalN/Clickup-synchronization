@@ -39,24 +39,6 @@ ic.headers.update({
 })
 
 # ==============================
-# ПОЛУЧЕНИЕ ФИНАЛЬНОЙ ССЫЛКИ (решает проблему редиректов)
-# ==============================
-def get_final_image_url(url: str, timeout=7) -> str:
-    """Возвращает финальную прямую ссылку после всех редиректов"""
-    try:
-        r = requests.head(url, timeout=timeout, allow_redirects=True)
-        if r.status_code == 200:
-            return r.url  # финальная ссылка
-        # Если HEAD не сработал — пробуем GET
-        r = requests.get(url, timeout=timeout, allow_redirects=True, stream=True)
-        if r.status_code == 200:
-            return r.url
-    except:
-        pass
-    return url  # возвращаем оригинал, если ничего не получилось
-
-
-# ==============================
 # ОБРАБОТКА СКРИНШОТОВ
 # ==============================
 def process_image_links(text: str) -> str:
@@ -69,27 +51,37 @@ def process_image_links(text: str) -> str:
         url = match.group(0).strip()
         original = url
 
-        # Icecream
+        # === Snipboard.io — ОСОБАЯ ОБРАБОТКА ===
+        if "snipboard.io/" in url:
+            # Используем прямую CDN-ссылку, чтобы избежать редиректов
+            if url.startswith("https://snipboard.io/"):
+                direct = url.replace("https://snipboard.io/", "https://i.snipboard.io/")
+                log.info(f"Snipboard преобразован: {direct}")
+                return f'<img src="{direct}" style="max-width:100%;">'
+            return f'<img src="{url}" style="max-width:100%;">'
+
+        # === Icecream ===
         if "icecream.me/" in url and "/uploads/" not in url:
             direct = f"https://icecream.me/uploads/{url.split('/')[-1]}.png"
-            return f'<img src="{get_final_image_url(direct)}" style="max-width:100%;">'
+            return f'<img src="{direct}" style="max-width:100%;">'
 
-        # Monosnap
+        # === Monosnap ===
         if "monosnap.ai/file/" in url and "api." not in url:
             direct = f"https://api.monosnap.ai/file/download?id={url.split('/')[-1]}"
-            return f'<img src="{get_final_image_url(direct)}" style="max-width:100%;">'
+            return f'<img src="{direct}" style="max-width:100%;">'
 
-        # tppr.me (битая — оставляем как текст)
+        # === tppr.me (если битая — оставляем как текст) ===
         if "tppr.me/" in url and "media.tppr.me" not in url:
             direct = f"https://media.tppr.me/uploads/{url.split('/')[-1]}.jpg"
-            final = get_final_image_url(direct)
-            if requests.head(final, timeout=5).status_code == 200:
-                return f'<img src="{final}" style="max-width:100%;">'
-            else:
-                log.warning(f"Пропускаем битую tppr: {direct}")
-                return original
+            try:
+                if requests.head(direct, timeout=5, allow_redirects=True).status_code == 200:
+                    return f'<img src="{direct}" style="max-width:100%;">'
+            except:
+                pass
+            log.warning(f"tppr.me битая: {direct}")
+            return original
 
-        # Imgur
+        # === Imgur ===
         if "imgur.com/" in url and "i.imgur.com" not in url:
             try:
                 r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
@@ -104,7 +96,7 @@ def process_image_links(text: str) -> str:
                 pass
             return original
 
-        # prnt.sc
+        # === prnt.sc ===
         if "prnt.sc/" in url or "prntscr.com/" in url:
             try:
                 r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
@@ -118,10 +110,9 @@ def process_image_links(text: str) -> str:
             except:
                 pass
 
-        # Прямые ссылки (включая snipboard)
+        # === Уже прямые ссылки ===
         if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
-            final_url = get_final_image_url(url)
-            return f'<img src="{final_url}" style="max-width:100%;">'
+            return f'<img src="{url}" style="max-width:100%;">'
 
         return original
 
@@ -160,7 +151,7 @@ def sync_article(task):
     if r.status_code not in (200, 201):
         log.error(f"Ошибка от Intercom:\n{r.text}")
     else:
-        log.info(f"✅ Успешно! ID статьи: {r.json().get('id')}")
+        log.info(f"✅ Успешно создано! ID: {r.json().get('id')}")
 
 
 def run_test_task():
