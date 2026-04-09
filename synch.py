@@ -60,28 +60,37 @@ def process_image_links(text: str) -> str:
 
     def transform_url(match):
         url = match.group(0).strip()
+        original = url # Объявили один раз в начале — теперь она видна везде ниже
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-        # --- MONOSNAP (поддержка /file/ и /direct/) ---
-        if "monosnap.ai" in url:
-            log.debug(f"Обработка Monosnap: {url}")
-            # Ищем ID после /file/ или /direct/
-            match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', url)
+        # --- MONOSNAP & TAKE.MS (поддержка редиректов take.ms) ---
+        if "monosnap.ai" in url or "take.ms" in url:
+            log.debug(f"Обработка Monosnap/Take: {url}")
+            current_url = url
+            
+            # Если это короткая ссылка take.ms, узнаем финальный URL
+            if "take.ms" in url:
+                try:
+                    # Делаем быстрый HEAD запрос, чтобы просто узнать Location
+                    r_head = requests.head(url, timeout=5, allow_redirects=True)
+                    current_url = r_head.url
+                    log.debug(f"Take.ms редирект на: {current_url}")
+                except:
+                    pass
+
+            # Теперь ищем ID в финальном URL (будь то оригинал или после редиректа)
+            match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
             if match_id:
                 img_id = match_id.group(1)
                 api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
-                m_headers = headers.copy()
-                m_headers["Referer"] = url
                 try:
-                    # Используем allow_redirects=True, чтобы пройти по цепочке до финальной картинки
-                    r = requests.get(api_url, timeout=15, headers=m_headers, allow_redirects=True)
+                    r = requests.get(api_url, timeout=10, headers={"Referer": current_url}, allow_redirects=True)
                     if r.status_code == 200 and "api.monosnap.ai" not in r.url:
-                        log.debug(f"--- УСПЕХ MONOSNAP --- Прямой URL: {r.url}")
                         return f'<img src="{r.url}" style="max-width:100%;">'
-                except Exception as e:
-                    log.error(f"Ошибка Monosnap: {e}")
+                except: pass
             return original
 
+        # --- TPPR.ME ---
         if "tppr.me/" in url:
             try:
                 r = requests.get(url, timeout=10, headers=headers)
@@ -91,7 +100,9 @@ def process_image_links(text: str) -> str:
                     proxy_url = f"https://images.weserv.nl/?url={meta['content'].replace('https://', '')}"
                     return f'<img src="{proxy_url}" style="max-width:100%;">'
             except: pass
+            return original # Возврат ссылки, если парсинг не удался
 
+        # --- ОСТАЛЬНЫЕ СЕРВИСЫ ---
         if any(x in url for x in ["imgur.com", "prnt.sc", "prntscr.com", "snipboard.io", "icecream.me"]):
             try:
                 r = requests.get(url, timeout=10, headers=headers)
@@ -100,11 +111,14 @@ def process_image_links(text: str) -> str:
                 src = img.get('content') if img and img.get('content') else (img.get('src') if img else None)
                 if src: return f'<img src="{src}" style="max-width:100%;">'
             except: pass
+            return original
 
-        if re.search(r'\.(png|jpe?g|gif|webp)', url.lower()):
+        # Прямые ссылки
+        if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
             return f'<img src="{url}" style="max-width:100%;">'
         
-        return f'<a href="{url}">{url}</a>'
+        # Если это просто ссылка (Google, YouTube и т.д.), возвращаем её как есть
+        return original
 
     return re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
 
