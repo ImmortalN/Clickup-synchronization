@@ -10,6 +10,7 @@ import requests
 from markdown import markdown
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+from markdown.extensions.fenced_code import FencedCodeExtension
 
 # ==============================
 # КОНФИГУРАЦИЯ
@@ -206,8 +207,21 @@ def sync_article(task, article_map):
     title = f"{name} [{task_id}]"[:255]
     desc = task.get("markdown_description") or task.get("description") or ""
     
-    body = f"<h1>{html.escape(name)}</h1>"
-    body += markdown(process_image_links(desc), extensions=['nl2br']) if desc else "<p>Нет описания</p>"
+    # Формируем заголовок
+    header_html = f"<h1>{html.escape(name)}</h1>"
+    
+    # Конвертируем описание с расширенными настройками для кода
+    if desc:
+        # Убираем codehilite, если не уверена в наличии Pygments на сервере
+        # fenced_code — главное, что сохраняет блоки кода
+        main_content = markdown(
+            process_image_links(desc), 
+            extensions=['fenced_code', 'nl2br', 'tables']
+        )
+    else:
+        main_content = "<p>Нет описания</p>"
+
+    body = f"{header_html}{main_content}"
 
     payload = {
         "title": title, "body": body[:50000],
