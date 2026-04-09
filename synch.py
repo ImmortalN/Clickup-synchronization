@@ -39,17 +39,8 @@ ic.headers.update({
 })
 
 # ==============================
-# БЕЗОПАСНАЯ ОБРАБОТКА КАРТИНОК
+# ОБРАБОТКА СКРИНШОТОВ
 # ==============================
-def is_image_ok(url: str, timeout=6) -> bool:
-    """Проверяем, может ли Intercom скачать картинку"""
-    try:
-        r = requests.head(url, timeout=timeout, allow_redirects=True)
-        return r.status_code == 200
-    except:
-        return False
-
-
 def process_image_links(text: str) -> str:
     if not text:
         return text
@@ -60,37 +51,58 @@ def process_image_links(text: str) -> str:
         url = match.group(0).strip()
         original = url
 
-        direct = None
-
-        # Snipboard.io
+        # ==================== РАБОЧИЕ ====================
+        # Snipboard
         if "snipboard.io/" in url:
             direct = url.replace("https://snipboard.io/", "https://i.snipboard.io/")
+            return f'<img src="{direct}" style="max-width:100%;">'
 
         # Icecream
-        elif "icecream.me/" in url and "/uploads/" not in url:
+        if "icecream.me/" in url and "/uploads/" not in url:
             direct = f"https://icecream.me/uploads/{url.split('/')[-1]}.png"
+            return f'<img src="{direct}" style="max-width:100%;">'
 
-        # Monosnap
-        elif "monosnap.ai/file/" in url and "api." not in url:
-            direct = f"https://api.monosnap.ai/file/download?id={url.split('/')[-1]}"
+        # Imgur
+        if "imgur.com/" in url and "i.imgur.com" not in url:
+            try:
+                r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'lxml')
+                    img = soup.find('img', src=re.compile(r'i\.imgur\.com'))
+                    if img and img.get('src'):
+                        src = img['src']
+                        if src.startswith('//'): src = 'https:' + src
+                        return f'<img src="{src}" style="max-width:100%;">'
+            except:
+                pass
+            return original
 
-        # tppr.me
-        elif "tppr.me/" in url and "media.tppr.me" not in url:
-            direct = f"https://media.tppr.me/uploads/{url.split('/')[-1]}.jpg"
+        # prnt.sc
+        if "prnt.sc/" in url or "prntscr.com/" in url:
+            try:
+                r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'lxml')
+                    img = soup.find('img', class_="no-click") or soup.find('img', id="screenshot-image")
+                    if img and img.get('src'):
+                        src = img['src']
+                        if src.startswith('//'): src = 'https:' + src
+                        return f'<img src="{src}" style="max-width:100%;">'
+            except:
+                pass
 
-        # Если нашли direct-ссылку — проверяем её
-        if direct:
-            if is_image_ok(direct):
-                log.debug(f"✅ Хорошая картинка: {direct}")
-                return f'<img src="{direct}" style="max-width:100%;">'
-            else:
-                log.warning(f"❌ Проблемная картинка, оставляем текст: {direct}")
-                return original
+        # GitHub
+        if "user-images.githubusercontent.com" in url:
+            return f'<img src="{url}" style="max-width:100%;">'
 
-        # Imgur, prnt.sc, GitHub и другие прямые
-        if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()) or "i.imgur.com" in url:
-            if is_image_ok(url):
-                return f'<img src="{url}" style="max-width:100%;">'
+        # ==================== ПРОБЛЕМНЫЕ — ОСТАВЛЯЕМ КАК ТЕКСТ ====================
+        if any(x in url for x in ["monosnap.ai", "tppr.me"]):
+            log.warning(f"Оставляем как обычную ссылку: {url}")
+            return original
+
+        # Остальные прямые ссылки
+        if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
+            return f'<img src="{url}" style="max-width:100%;">'
 
         return original
 
