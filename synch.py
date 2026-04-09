@@ -14,7 +14,6 @@ load_dotenv()
 # КОНФИГУРАЦИЯ
 # ==============================
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN")
-SPACE_ID = "90125205902"
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
 INTERCOM_VERSION = os.getenv("INTERCOM_VERSION", "2.14")
@@ -22,15 +21,11 @@ INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID"))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
 
 TEST_TASK_ID = "869cumg5k"
-SYNC_STATE_FILE = ".sync_state.json"
 
 # ==============================
 # ЛОГИРОВАНИЕ
 # ==============================
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s: %(message)s"
-)
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 cu = requests.Session()
@@ -51,7 +46,6 @@ def process_image_links(text: str) -> str:
     if not text:
         return text
 
-    # Убираем markdown-ссылки
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
     def transform_url(match):
@@ -60,18 +54,15 @@ def process_image_links(text: str) -> str:
 
         # Icecream
         if "icecream.me/" in url and "/uploads/" not in url:
-            img_id = url.split('/')[-1]
-            return f'<img src="https://icecream.me/uploads/{img_id}.png" style="max-width:100%;">'
+            return f'<img src="https://icecream.me/uploads/{url.split("/")[-1]}.png" style="max-width:100%;">'
 
         # Monosnap
-        if "monosnap.ai/file/" in url and "api.monosnap.ai" not in url:
-            img_id = url.split('/')[-1]
-            return f'<img src="https://api.monosnap.ai/file/download?id={img_id}" style="max-width:100%;">'
+        if "monosnap.ai/file/" in url and "api." not in url:
+            return f'<img src="https://api.monosnap.ai/file/download?id={url.split("/")[-1]}" style="max-width:100%;">'
 
         # tppr.me
-        if "tppr.me/" in url and "media.tppr.me" not in url:
-            img_id = url.split('/')[-1]
-            return f'<img src="https://media.tppr.me/uploads/{img_id}.jpg" style="max-width:100%;">'
+        if "tppr.me/" in url and "media." not in url:
+            return f'<img src="https://media.tppr.me/uploads/{url.split("/")[-1]}.jpg" style="max-width:100%;">'
 
         # Imgur
         if "imgur.com/" in url and "i.imgur.com" not in url:
@@ -102,37 +93,26 @@ def process_image_links(text: str) -> str:
             except:
                 pass
 
-        # Прямые ссылки
-        if re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()):
+        if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
             return f'<img src="{url}" style="max-width:100%;">'
 
         return original
 
     text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
-    text = text.replace(' /><img', ' /><br><br><img')
     return text
 
 
-# ==============================
-# HTML ДЛЯ INTERCOM (как в старом коде)
-# ==============================
 def task_to_html(task):
     name = task.get("name") or "(Без названия)"
     desc = task.get("description") or ""
 
-    processed_desc = process_image_links(desc)
+    processed = process_image_links(desc)
+    body = markdown(processed) if processed else "<p>Нет описания</p>"
 
-    body = markdown(processed_desc) if processed_desc else "<p>Нет описания</p>"
-
-    # Ограничение размера
-    if len(body) > 45000:
-        body = body[:45000] + "<p><em>Описание урезано</em></p>"
-
-    # Формат как в твоём старом рабочем коде
     return f"# {html.escape(name)}\n\n{body}"
 
 
-def sync_article(task, article_map):
+def sync_article(task):
     task_id = task["id"]
     title = f"{task.get('name') or 'Untitled'} [{task_id}]"[:255]
     body = task_to_html(task)
@@ -147,37 +127,26 @@ def sync_article(task, article_map):
         "locale": "en"
     }
 
-    if task_id in article_map:
-        article_id = article_map[task_id]
-        log.info(f"Обновляем статью {task_id}")
-        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
-    else:
-        log.info(f"Создаём новую статью {task_id}")
-        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+    log.info("Отправляем запрос в Intercom...")
+    r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
 
-    if r:
-        log.info(f"Intercom код: {r.status_code}")
-        if r.status_code in (200, 201):
-            log.info("✅ Успешно создано!")
-            return r.json().get("id")
-        else:
-            log.error(f"❌ Ошибка {r.status_code}: {r.text[:800]}")
+    log.info(f"Статус: {r.status_code}")
+    if r.status_code not in (200, 201):
+        log.error(f"Текст ошибки от Intercom:\n{r.text}")
     else:
-        log.error("❌ Нет ответа от Intercom")
+        log.info(f"✅ Успешно! ID = {r.json().get('id')}")
 
-    return None
+    return r.json().get("id") if r.status_code in (200, 201) else None
 
 
 # ==============================
-# ЗАПУСК
+# ТЕСТ
 # ==============================
 def run_test_task():
     log.info(f"=== ТЕСТ ЗАДАЧИ {TEST_TASK_ID} ===")
 
-    r = cu.get(
-        f"https://api.clickup.com/api/v2/task/{TEST_TASK_ID}",
-        params={"include_markdown_description": "true"}
-    )
+    r = cu.get(f"https://api.clickup.com/api/v2/task/{TEST_TASK_ID}", 
+               params={"include_markdown_description": "true"})
 
     if r.status_code != 200:
         log.error("Задача не найдена")
@@ -186,11 +155,7 @@ def run_test_task():
     task = r.json()
     task["description"] = task.get("markdown_description") or task.get("description") or ""
 
-    article_map = {}  # упростили для теста
-    # Загружаем статьи только если нужно обновлять
-    # article_map = load_all_articles()
-
-    sync_article(task, article_map)
+    sync_article(task)
 
 
 if __name__ == "__main__":
