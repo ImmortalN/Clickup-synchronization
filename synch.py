@@ -1,5 +1,4 @@
 import os
-import json
 import html
 import logging
 import re
@@ -40,14 +39,22 @@ ic.headers.update({
 })
 
 # ==============================
-# ПРОВЕРКА РАБОТОСПОСОБНОСТИ КАРТИНКИ
+# ПОЛУЧЕНИЕ ФИНАЛЬНОЙ ССЫЛКИ (решает проблему редиректов)
 # ==============================
-def is_image_accessible(url: str, timeout=6) -> bool:
+def get_final_image_url(url: str, timeout=7) -> str:
+    """Возвращает финальную прямую ссылку после всех редиректов"""
     try:
         r = requests.head(url, timeout=timeout, allow_redirects=True)
-        return r.status_code == 200
+        if r.status_code == 200:
+            return r.url  # финальная ссылка
+        # Если HEAD не сработал — пробуем GET
+        r = requests.get(url, timeout=timeout, allow_redirects=True, stream=True)
+        if r.status_code == 200:
+            return r.url
     except:
-        return False
+        pass
+    return url  # возвращаем оригинал, если ничего не получилось
+
 
 # ==============================
 # ОБРАБОТКА СКРИНШОТОВ
@@ -62,29 +69,27 @@ def process_image_links(text: str) -> str:
         url = match.group(0).strip()
         original = url
 
-        # === Icecream ===
+        # Icecream
         if "icecream.me/" in url and "/uploads/" not in url:
-            img_id = url.split('/')[-1]
-            direct = f"https://icecream.me/uploads/{img_id}.png"
-            return f'<img src="{direct}" style="max-width:100%;">' if is_image_accessible(direct) else original
+            direct = f"https://icecream.me/uploads/{url.split('/')[-1]}.png"
+            return f'<img src="{get_final_image_url(direct)}" style="max-width:100%;">'
 
-        # === Monosnap ===
+        # Monosnap
         if "monosnap.ai/file/" in url and "api." not in url:
-            img_id = url.split('/')[-1]
-            direct = f"https://api.monosnap.ai/file/download?id={img_id}"
-            return f'<img src="{direct}" style="max-width:100%;">' if is_image_accessible(direct) else original
+            direct = f"https://api.monosnap.ai/file/download?id={url.split('/')[-1]}"
+            return f'<img src="{get_final_image_url(direct)}" style="max-width:100%;">'
 
-        # === tppr.me — ИСПРАВЛЕНО ===
+        # tppr.me (битая — оставляем как текст)
         if "tppr.me/" in url and "media.tppr.me" not in url:
-            img_id = url.split('/')[-1]
-            direct = f"https://media.tppr.me/uploads/{img_id}.jpg"
-            if is_image_accessible(direct):
-                return f'<img src="{direct}" style="max-width:100%;">'
+            direct = f"https://media.tppr.me/uploads/{url.split('/')[-1]}.jpg"
+            final = get_final_image_url(direct)
+            if requests.head(final, timeout=5).status_code == 200:
+                return f'<img src="{final}" style="max-width:100%;">'
             else:
-                log.warning(f"tppr.me картинка битая: {direct}")
-                return original  # оставляем оригинальную ссылку
+                log.warning(f"Пропускаем битую tppr: {direct}")
+                return original
 
-        # === Imgur ===
+        # Imgur
         if "imgur.com/" in url and "i.imgur.com" not in url:
             try:
                 r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
@@ -99,7 +104,7 @@ def process_image_links(text: str) -> str:
                 pass
             return original
 
-        # === prnt.sc ===
+        # prnt.sc
         if "prnt.sc/" in url or "prntscr.com/" in url:
             try:
                 r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
@@ -113,9 +118,10 @@ def process_image_links(text: str) -> str:
             except:
                 pass
 
-        # Прямые ссылки
+        # Прямые ссылки (включая snipboard)
         if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
-            return f'<img src="{url}" style="max-width:100%;">' if is_image_accessible(url) else original
+            final_url = get_final_image_url(url)
+            return f'<img src="{final_url}" style="max-width:100%;">'
 
         return original
 
@@ -156,12 +162,7 @@ def sync_article(task):
     else:
         log.info(f"✅ Успешно! ID статьи: {r.json().get('id')}")
 
-    return r.json().get("id") if r.status_code in (200, 201) else None
 
-
-# ==============================
-# ЗАПУСК
-# ==============================
 def run_test_task():
     log.info(f"=== ТЕСТ ЗАДАЧИ {TEST_TASK_ID} ===")
 
