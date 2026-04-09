@@ -54,30 +54,27 @@ def process_image_links(text: str) -> str:
 
         # ==================== MONOSNAP ====================
         if "monosnap.ai" in url:
-            # Чистим URL от возможных префиксов API, если они попали в текст
-            clean_url = url.replace("api.monosnap.ai/file/download?id=", "monosnap.ai/file/")
-            log.debug(f"Обработка Monosnap: {clean_url}")
-            
             try:
-                # Заходим на страницу
-                r = requests.get(clean_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                if r.status_code == 200:
-                    soup = BeautifulSoup(r.text, 'lxml')
-                    # Ищем мета-тег с прямой ссылкой на изображение
-                    meta_img = soup.find('meta', property="og:image")
-                    if meta_img and meta_img.get('content'):
-                        direct = meta_img['content']
-                        if direct.startswith('//'):
-                            direct = 'https:' + direct
-                        log.debug(f"--- УСПЕХ MONOSNAP --- Прямой URL: {direct}")
-                        return f'<img src="{direct}" style="max-width:100%;">'
-                    else:
-                        log.warning("Мета-тег og:image не найден на странице Monosnap")
-                else:
-                    log.warning(f"Страница Monosnap ответила статусом {r.status_code}")
+                img_id = url.split('/')[-1]
+                # Пробуем получить адрес, куда редиректит их API
+                # Мы используем head запрос, чтобы просто узнать финальный URL без скачивания файла
+                api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
+                r = requests.head(api_url, timeout=10, allow_redirects=True, headers=headers)
+                
+                if r.status_code == 200 and "monosnap.com" in r.url:
+                    log.debug(f"Monosnap прямая ссылка найдена: {r.url}")
+                    return f'<img src="{r.url}" style="max-width:100%;">'
+                
+                # Если редирект не сработал, пробуем распарсить мета-теги страницы
+                r_page = requests.get(url, timeout=10, headers=headers)
+                soup = BeautifulSoup(r_page.text, 'lxml')
+                meta_img = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image")
+                if meta_img:
+                    src = meta_img['content']
+                    if src.startswith('//'): src = 'https:' + src
+                    return f'<img src="{src}" style="max-width:100%;">'
             except Exception as e:
-                log.error(f"Ошибка при парсинге Monosnap: {e}")
-            
+                log.error(f"Ошибка Monosnap: {e}")
             return original
             
         # ==================== SNIPBOARD ====================
