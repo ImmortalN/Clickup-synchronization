@@ -228,7 +228,7 @@ def run_test_task():
         task["description"] = task.get("markdown_description") or task.get("description") or ""
         article_map = load_all_articles()
         res = sync_article(task, article_map)
-        log.info(f"Результат теста: {'Успех, ID ' + res if res else 'Ошибка'}")
+        log.info(f"Результат теста: {'Успех, ID ' + str(res) if res else 'Ошибка'}")
     else:
         log.error(f"Не удалось найти задачу {TEST_TASK_ID} в ClickUp")
 
