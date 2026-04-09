@@ -127,17 +127,30 @@ def process_image_links(text: str) -> str:
 
         # ==================== TPPR.ME ====================
         if "tppr.me/" in url:
+            log.debug(f"Обработка Tppr: {url}")
+            try:
+                # Используем заголовки, чтобы сайт не блокировал скрипт
+                local_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"}
+                r = requests.get(url, timeout=10, headers=local_headers)
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'lxml')
+                    # Ищем прямую ссылку в мета-тегах
+                    meta_img = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image:src")
+                    
+                    if meta_img and meta_img.get('content'):
+                        src = meta_img['content']
+                        # КЛЮЧЕВОЙ МОМЕНТ: Заменяем домен S3 на media.tppr.me
+                        # Intercom блокирует ссылки напрямую на амазоновские бакеты tppr
+                        if "tppr.s3.eu-central-1.amazonaws.com" in src:
+                            src = src.replace("tppr.s3.eu-central-1.amazonaws.com", "media.tppr.me")
+                        
+                        log.debug(f"--- УСПЕХ TPPR --- Прямой URL: {src}")
+                        return f'<img src="{src}" style="max-width:100%;">'
+            except Exception as e:
+                log.error(f"Ошибка при парсинге Tppr: {e}")
+            
+            # Если не получилось сделать картинку, оставляем просто ссылку
             return f'<a href="{url}">{url}</a>'
-
-        # GitHub и прочие прямые
-        if "user-images.githubusercontent.com" in url or re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
-            return f'<img src="{url}" style="max-width:100%;">'
-
-        return original
-
-    # Поиск всех ссылок
-    text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
-    return text
 
 
 def task_to_html(task):
