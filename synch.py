@@ -5,7 +5,7 @@ import re
 import requests
 from markdown import markdown
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup  # Нужна установка: pip install beautifulsoup4 lxml
 
 load_dotenv()
 
@@ -45,6 +45,7 @@ def process_image_links(text: str) -> str:
     if not text:
         return text
 
+    # Убираем Markdown обертку [link](url) -> url
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
     def transform_url(match):
@@ -54,15 +55,13 @@ def process_image_links(text: str) -> str:
         # ==================== MONOSNAP (Твоя схема) ====================
         if "monosnap.ai/file/" in url and "api.monosnap.ai" not in url:
             img_id = url.split('/')[-1]
-            # Превращаем в прямую ссылку через их API
             direct = f"https://api.monosnap.ai/file/download?id={img_id}"
             return f'<img src="{direct}" style="max-width:100%;">'
 
         # ==================== SNIPBOARD ====================
         if "snipboard.io/" in url:
             direct = url.replace("https://snipboard.io/", "https://i.snipboard.io/")
-            # Добавляем .jpg если его нет в конце, snipboard это любит
-            if not direct.endswith('.jpg'): direct += ".jpg"
+            if not direct.endswith(('.jpg', '.png')): direct += ".jpg"
             return f'<img src="{direct}" style="max-width:100%;">'
 
         # ==================== ICECREAM ====================
@@ -71,38 +70,21 @@ def process_image_links(text: str) -> str:
             direct = f"https://icecream.me/uploads/{img_id}.png"
             return f'<img src="{direct}" style="max-width:100%;">'
 
-        # ==================== TPPR.ME (Парсинг страницы) ====================
-        if "tppr.me/" in url:
-            try:
-                r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-                if r.status_code == 200:
-                    soup = BeautifulSoup(r.text, 'lxml')
-                    # Ищем картинку в их основном контейнере
-                    img = soup.find('img', class_=re.compile(r'screenshot')) or soup.find('meta', property="og:image")
-                    src = img.get('src') or img.get('content')
-                    if src:
-                        return f'<img src="{src}" style="max-width:100%;">'
-            except:
-                pass
-            return original
-
-        # ==================== IMGUR (Улучшенный парсинг) ====================
+        # ==================== IMGUR (Парсинг через og:image) ====================
         if "imgur.com/" in url and "i.imgur.com" not in url:
             try:
                 r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, 'lxml')
-                    # Проверяем мета-теги, Imgur там всегда держит прямую ссылку
                     meta_img = soup.find('meta', property="og:image")
                     if meta_img:
-                        src = meta_img['content']
-                        if "?" in src: src = src.split("?")[0] # Убираем лишние параметры
+                        src = meta_img['content'].split("?")[0]
                         return f'<img src="{src}" style="max-width:100%;">'
-            except:
-                pass
+            except Exception as e:
+                log.debug(f"Ошибка парсинга Imgur: {e}")
             return original
 
-        # ==================== PRNT.SC ====================
+        # ==================== PRNT.SC / LIGHTSHOT ====================
         if "prnt.sc/" in url or "prntscr.com/" in url:
             try:
                 r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
@@ -113,8 +95,14 @@ def process_image_links(text: str) -> str:
                         src = img['src']
                         if src.startswith('//'): src = 'https:' + src
                         return f'<img src="{src}" style="max-width:100%;">'
-            except:
-                pass
+            except Exception as e:
+                log.debug(f"Ошибка парсинга Prnt.sc: {e}")
+            return original
+
+        # ==================== TPPR.ME (Защита от ошибки 400) ====================
+        if "tppr.me/" in url:
+            # Оставляем ссылкой, так как Intercom не любит их Amazon S3 хранилище
+            return f'<a href="{url}">{url}</a>'
 
         # GitHub и прочие прямые ссылки
         if "user-images.githubusercontent.com" in url or re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
@@ -122,7 +110,7 @@ def process_image_links(text: str) -> str:
 
         return original
 
-    # Регулярка для поиска всех ссылок
+    # Поиск всех ссылок
     text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
     return text
 
@@ -132,9 +120,10 @@ def task_to_html(task):
     desc = task.get("description") or ""
 
     processed = process_image_links(desc)
-    body = markdown(processed) if processed else "<p>Нет описания</p>"
+    # Используем расширение nl2br для сохранения переносов строк
+    body = markdown(processed, extensions=['nl2br']) if processed else "<p>Нет описания</p>"
 
-    return f"# {html.escape(name)}\n\n{body}"
+    return f"<h1>{html.escape(name)}</h1>\n\n{body}"
 
 
 def sync_article(task):
@@ -154,21 +143,22 @@ def sync_article(task):
 
     r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
 
-    log.info(f"Статус: {r.status_code}")
+    log.info(f"Статус ответа Intercom: {r.status_code}")
     if r.status_code not in (200, 201):
-        log.error(f"Ошибка от Intercom:\n{r.text}")
+        log.error(f"Ошибка публикации в Intercom:\n{r.text}")
     else:
-        log.info(f"✅ Успешно! ID статьи: {r.json().get('id')}")
+        article_id = r.json().get('id')
+        log.info(f"✅ Успешно синхронизировано! ID статьи: {article_id}")
 
 
 def run_test_task():
-    log.info(f"=== ТЕСТ ЗАДАЧИ {TEST_TASK_ID} ===")
+    log.info(f"=== ЗАПУСК ТЕСТА ДЛЯ ЗАДАЧИ {TEST_TASK_ID} ===")
 
     r = cu.get(f"https://api.clickup.com/api/v2/task/{TEST_TASK_ID}", 
                params={"include_markdown_description": "true"})
 
     if r.status_code != 200:
-        log.error("Задача не найдена")
+        log.error(f"Задача {TEST_TASK_ID} не найдена в ClickUp (Status: {r.status_code})")
         return
 
     task = r.json()
