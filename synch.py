@@ -129,37 +129,28 @@ def process_image_links(text: str) -> str:
         if "tppr.me/" in url:
             log.debug(f"Обработка Tppr: {url}")
             try:
-                # Используем те же заголовки, что и для Monosnap
-                local_headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
-                }
+                local_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"}
                 r = requests.get(url, timeout=10, headers=local_headers)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, 'lxml')
-                    
-                    # 1. Пробуем достать из og:image (там обычно ссылка на S3)
                     meta_img = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image:src")
                     
-                    # 2. Если мета-теги не сработали, ищем прямо в теге <img> внутри контента
                     src = None
                     if meta_img and meta_img.get('content'):
                         src = meta_img['content']
-                    else:
-                        img_tag = soup.find('img', class_="h-full w-full") # специфичный класс из присланной разметки
-                        if img_tag:
-                            src = img_tag.get('src')
-
+                    
                     if src:
-                        log.debug(f"--- УСПЕХ TPPR --- Прямой URL найден: {src}")
+                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Intercom не любит ссылки на S3.
+                        # Меняем прямой адрес S3 на их официальный медиа-домен.
+                        if "tppr.s3.eu-central-1.amazonaws.com" in src:
+                            src = src.replace("tppr.s3.eu-central-1.amazonaws.com", "media.tppr.me")
+                        
+                        log.debug(f"--- УСПЕХ TPPR (PROXY) --- Прямой URL: {src}")
                         return f'<img src="{src}" style="max-width:100%;">'
             except Exception as e:
-                log.error(f"Ошибка при парсинге Tppr: {e}")
+                log.error(f"Ошибка Tppr: {e}")
             
-            # Если не удалось превратить в картинку, возвращаем ссылкой (чтобы не упал Intercom)
             return f'<a href="{url}">{url}</a>'
-    # Поиск всех ссылок
-    text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
-    return text
 
 
 def task_to_html(task):
