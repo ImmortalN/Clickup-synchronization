@@ -65,44 +65,49 @@ def process_image_links(text):
     if not text:
         return text
 
-    # 1. Сначала убираем Markdown-обертки [link](url), оставляя только URL
-    # Это предотвратит появление лишних скобок и кавычек в Intercom
+    # 1. Убираем Markdown ссылки [link](url) -> оставляем только url
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
-    # Функция-помощник для трансформации URL в прямую картинку
     def transform_to_direct_url(match):
         url = match.group(0).strip()
         
         # Icecream
-        if "icecream.me/" in url:
+        if "icecream.me/" in url and "/uploads/" not in url:
             img_id = url.split('/')[-1]
             return f'<img src="https://icecream.me/uploads/{img_id}.png" style="max-width:100%;" />'
         
-        # Imgur Album -> Direct
-        if "imgur.com/a/" in url:
+        # Imgur (альбомы и страницы)
+        if "imgur.com/" in url and "i.imgur.com" not in url:
             img_id = url.split('/')[-1]
             return f'<img src="https://i.imgur.com/{img_id}.png" style="max-width:100%;" />'
         
         # Monosnap
-        if "monosnap.ai/file/" in url:
+        if "monosnap.ai/file/" in url and "api." not in url:
             img_id = url.split('/')[-1]
             return f'<img src="https://api.monosnap.ai/file/download?id={img_id}" style="max-width:100%;" />'
             
         # Tppr.me
-        if "tppr.me/" in url:
+        if "tppr.me/" in url and "media." not in url:
             img_id = url.split('/')[-1]
             return f'<img src="https://media.tppr.me/uploads/{img_id}.jpg" style="max-width:100%;" />'
 
-        # Прямые ссылки на файлы (уже картинки)
+        # Если это уже прямая ссылка (Snipboard, GitHub или уже обработанные)
         if re.search(r'\.(png|jpg|jpeg|gif|webp)(\?.*)?$', url.lower()):
+            # Проверяем, не обернута ли она уже в <img> (чтобы не дублировать)
             return f'<img src="{url}" style="max-width:100%;" />'
 
-        # Если это что-то другое (например prnt.sc), оставляем просто ссылкой
+        # Остальное (включая prnt.sc) оставляем как текст/ссылку
         return url
 
-    # 2. Ищем все URL в тексте и прогоняем через трансформатор
+    # Регулярка для поиска URL, которая не берет лишние кавычки или пробелы
     url_pattern = r'https?://[^\s\)\"\'\>]+'
+    
+    # Обрабатываем текст
     text = re.sub(url_pattern, transform_to_direct_url, text)
+    
+    # Очистка: если после замены получились двойные <img><img>, 
+    # Intercom их съест, но лучше добавить перенос строки между ними
+    text = text.replace(' /><img', ' /><br /><img')
 
     return text
 
