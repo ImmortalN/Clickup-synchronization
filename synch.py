@@ -126,30 +126,24 @@ def process_image_links(text: str) -> str:
             return original
 
         # ==================== TPPR.ME ====================
+        # ==================== TPPR.ME ====================
         if "tppr.me/" in url:
             log.debug(f"Обработка Tppr: {url}")
             try:
-                # Используем заголовки, чтобы сайт не блокировал скрипт
                 local_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"}
                 r = requests.get(url, timeout=10, headers=local_headers)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, 'lxml')
-                    # Ищем прямую ссылку в мета-тегах
                     meta_img = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image:src")
-                    
                     if meta_img and meta_img.get('content'):
                         src = meta_img['content']
-                        # КЛЮЧЕВОЙ МОМЕНТ: Заменяем домен S3 на media.tppr.me
-                        # Intercom блокирует ссылки напрямую на амазоновские бакеты tppr
+                        # Подмена для Intercom
                         if "tppr.s3.eu-central-1.amazonaws.com" in src:
                             src = src.replace("tppr.s3.eu-central-1.amazonaws.com", "media.tppr.me")
-                        
-                        log.debug(f"--- УСПЕХ TPPR --- Прямой URL: {src}")
+                        log.debug(f"--- УСПЕХ TPPR --- {src}")
                         return f'<img src="{src}" style="max-width:100%;">'
             except Exception as e:
-                log.error(f"Ошибка при парсинге Tppr: {e}")
-            
-            # Если не получилось сделать картинку, оставляем просто ссылку
+                log.error(f"Ошибка Tppr: {e}")
             return f'<a href="{url}">{url}</a>'
 
 
@@ -176,6 +170,7 @@ def sync_article(task):
         "body": body,
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
+        "folder_id": 4101985,
         "locale": "en"
     }
 
@@ -196,16 +191,20 @@ def run_test_task():
                params={"include_markdown_description": "true"})
 
     if r.status_code != 200:
-        log.error(f"Задача {TEST_TASK_ID} не найдена в ClickUp (Status: {r.status_code})")
+        log.error(f"Задача {TEST_TASK_ID} не найдена")
         return
 
     task = r.json()
-    task["description"] = task.get("markdown_description") or task.get("description") or ""
+    
+    # Пытаемся взять Markdown, если его нет - обычное описание, если и его нет - пустую строку
+    md_desc = task.get("markdown_description")
+    text_desc = task.get("description")
+    
+    task["description"] = md_desc if md_desc else (text_desc if text_desc else "")
+    
+    if not task["description"]:
+        log.warning("ВНИМАНИЕ: Описание задачи в ClickUp пустое!")
 
     sync_article(task)
-
-
-if __name__ == "__main__":
-    run_test_task()
 
 
