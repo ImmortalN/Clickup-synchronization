@@ -53,27 +53,25 @@ def process_image_links(text: str) -> str:
         original = url
 
         # ==================== MONOSNAP ====================
-        if "monosnap.ai" in url:
+        # ==================== MONOSNAP ====================
+        if "monosnap.ai/file/" in url:
             log.debug(f"Найдена ссылка Monosnap: {url}")
-            # Извлекаем ID (все символы после последнего слэша, игнорируя параметры)
-            match_id = re.search(r'file/([a-zA-Z0-9]+)', url)
-            if match_id:
-                img_id = match_id.group(1)
-                api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
-                try:
-                    log.debug(f"Запрос прямой ссылки через API: {api_url}")
-                    # Обязательно добавляем User-Agent, иначе Monosnap может сбросить соединение
-                    r = requests.get(api_url, timeout=10, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
-                    if r.status_code == 200:
-                        direct = r.url
-                        log.debug(f"Получен прямой URL: {direct}")
+            try:
+                # Заходим на страницу просмотра
+                r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, 'lxml')
+                    # Monosnap прячет прямую ссылку в мета-теге og:image
+                    meta_img = soup.find('meta', property="og:image")
+                    if meta_img and meta_img.get('content'):
+                        direct = meta_img['content']
+                        # Иногда там ссылки типа //store.monosnap.com...
+                        if direct.startswith('//'):
+                            direct = 'https:' + direct
+                        log.debug(f"Успех! Прямой URL картинки: {direct}")
                         return f'<img src="{direct}" style="max-width:100%;">'
-                    else:
-                        log.warning(f"Monosnap API ответил статусом {r.status_code}")
-                except Exception as e:
-                    log.error(f"Ошибка при обработке Monosnap: {e}")
-            else:
-                log.warning("Не удалось извлечь ID из ссылки Monosnap")
+            except Exception as e:
+                log.error(f"Ошибка парсинга Monosnap: {e}")
             return original
             
         # ==================== SNIPBOARD ====================
