@@ -53,17 +53,29 @@ def process_image_links(text: str) -> str:
         original = url
 
         # ==================== MONOSNAP ====================
-        if "monosnap.ai/file/" in url:
-            img_id = url.split('/')[-1]
-            api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
-            try:
-                r = requests.get(api_url, timeout=10, allow_redirects=True)
-                if r.status_code == 200:
-                    return f'<img src="{r.url}" style="max-width:100%;">'
-            except:
-                pass
+        if "monosnap.ai" in url:
+            log.debug(f"Найдена ссылка Monosnap: {url}")
+            # Извлекаем ID (все символы после последнего слэша, игнорируя параметры)
+            match_id = re.search(r'file/([a-zA-Z0-9]+)', url)
+            if match_id:
+                img_id = match_id.group(1)
+                api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
+                try:
+                    log.debug(f"Запрос прямой ссылки через API: {api_url}")
+                    # Обязательно добавляем User-Agent, иначе Monosnap может сбросить соединение
+                    r = requests.get(api_url, timeout=10, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+                    if r.status_code == 200:
+                        direct = r.url
+                        log.debug(f"Получен прямой URL: {direct}")
+                        return f'<img src="{direct}" style="max-width:100%;">'
+                    else:
+                        log.warning(f"Monosnap API ответил статусом {r.status_code}")
+                except Exception as e:
+                    log.error(f"Ошибка при обработке Monosnap: {e}")
+            else:
+                log.warning("Не удалось извлечь ID из ссылки Monosnap")
             return original
-
+            
         # ==================== SNIPBOARD ====================
         if "snipboard.io/" in url:
             direct = url.replace("https://snipboard.io/", "https://i.snipboard.io/")
