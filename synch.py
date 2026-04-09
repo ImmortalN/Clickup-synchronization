@@ -40,6 +40,16 @@ ic.headers.update({
 })
 
 # ==============================
+# ПРОВЕРКА РАБОТОСПОСОБНОСТИ КАРТИНКИ
+# ==============================
+def is_image_accessible(url: str, timeout=6) -> bool:
+    try:
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        return r.status_code == 200
+    except:
+        return False
+
+# ==============================
 # ОБРАБОТКА СКРИНШОТОВ
 # ==============================
 def process_image_links(text: str) -> str:
@@ -52,19 +62,29 @@ def process_image_links(text: str) -> str:
         url = match.group(0).strip()
         original = url
 
-        # Icecream
+        # === Icecream ===
         if "icecream.me/" in url and "/uploads/" not in url:
-            return f'<img src="https://icecream.me/uploads/{url.split("/")[-1]}.png" style="max-width:100%;">'
+            img_id = url.split('/')[-1]
+            direct = f"https://icecream.me/uploads/{img_id}.png"
+            return f'<img src="{direct}" style="max-width:100%;">' if is_image_accessible(direct) else original
 
-        # Monosnap
+        # === Monosnap ===
         if "monosnap.ai/file/" in url and "api." not in url:
-            return f'<img src="https://api.monosnap.ai/file/download?id={url.split("/")[-1]}" style="max-width:100%;">'
+            img_id = url.split('/')[-1]
+            direct = f"https://api.monosnap.ai/file/download?id={img_id}"
+            return f'<img src="{direct}" style="max-width:100%;">' if is_image_accessible(direct) else original
 
-        # tppr.me
-        if "tppr.me/" in url and "media." not in url:
-            return f'<img src="https://media.tppr.me/uploads/{url.split("/")[-1]}.jpg" style="max-width:100%;">'
+        # === tppr.me — ИСПРАВЛЕНО ===
+        if "tppr.me/" in url and "media.tppr.me" not in url:
+            img_id = url.split('/')[-1]
+            direct = f"https://media.tppr.me/uploads/{img_id}.jpg"
+            if is_image_accessible(direct):
+                return f'<img src="{direct}" style="max-width:100%;">'
+            else:
+                log.warning(f"tppr.me картинка битая: {direct}")
+                return original  # оставляем оригинальную ссылку
 
-        # Imgur
+        # === Imgur ===
         if "imgur.com/" in url and "i.imgur.com" not in url:
             try:
                 r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
@@ -79,7 +99,7 @@ def process_image_links(text: str) -> str:
                 pass
             return original
 
-        # prnt.sc
+        # === prnt.sc ===
         if "prnt.sc/" in url or "prntscr.com/" in url:
             try:
                 r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
@@ -93,8 +113,9 @@ def process_image_links(text: str) -> str:
             except:
                 pass
 
+        # Прямые ссылки
         if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
-            return f'<img src="{url}" style="max-width:100%;">'
+            return f'<img src="{url}" style="max-width:100%;">' if is_image_accessible(url) else original
 
         return original
 
@@ -127,20 +148,19 @@ def sync_article(task):
         "locale": "en"
     }
 
-    log.info("Отправляем запрос в Intercom...")
     r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
 
     log.info(f"Статус: {r.status_code}")
     if r.status_code not in (200, 201):
-        log.error(f"Текст ошибки от Intercom:\n{r.text}")
+        log.error(f"Ошибка от Intercom:\n{r.text}")
     else:
-        log.info(f"✅ Успешно! ID = {r.json().get('id')}")
+        log.info(f"✅ Успешно! ID статьи: {r.json().get('id')}")
 
     return r.json().get("id") if r.status_code in (200, 201) else None
 
 
 # ==============================
-# ТЕСТ
+# ЗАПУСК
 # ==============================
 def run_test_task():
     log.info(f"=== ТЕСТ ЗАДАЧИ {TEST_TASK_ID} ===")
