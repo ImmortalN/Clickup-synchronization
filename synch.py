@@ -23,14 +23,16 @@ IGNORED_LIST_IDS        = {"901212791461", "901212763746"}
 
 INTERCOM_TOKEN          = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE           = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
+INTERCOM_VERSION        = os.getenv("INTERCOM_VERSION", "2.14")
 INTERCOM_OWNER_ID       = int(os.getenv("INTERCOM_OWNER_ID"))
-INTERCOM_AUTHOR_ID       = int(os.getenv("INTERCOM_AUTHOR_ID"))
-INTERCOM_FOLDER_ID      = 4101985  # Твоя папка
+INTERCOM_AUTHOR_ID      = int(os.getenv("INTERCOM_AUTHOR_ID"))
+INTERCOM_FOLDER_ID      = 4101985
 
-# Параметры запуска
 LOOKBACK_HOURS          = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
 FETCH_ALL               = os.getenv("FETCH_ALL", "false").lower() == "true"
+CLICKUP_ONLY_OPEN       = os.getenv("CLICKUP_ONLY_OPEN", "true").lower() == "true"
 MAX_TASKS_FOR_TEST      = int(os.getenv("MAX_TASKS_FOR_TEST", 0))
+SYNC_STATE_FILE         = ".sync_state.json"
 
 # ==============================
 # ЛОГИРОВАНИЕ И СЕССИИ
@@ -45,23 +47,21 @@ ic = requests.Session()
 ic.headers.update({
     "Authorization": f"Bearer {INTERCOM_TOKEN}",
     "Accept": "application/json",
-    "Intercom-Version": "2.14",
+    "Intercom-Version": INTERCOM_VERSION,
     "Content-Type": "application/json"
 })
 
 # ==============================
-# ОБРАБОТКА СКРИНШОТОВ (ФИНАЛЬНАЯ ВЕРСИЯ)
+# ОБРАБОТКА СКРИНШОТОВ
 # ==============================
 def process_image_links(text: str) -> str:
     if not text: return text
-    # Очистка Markdown ссылок
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
     def transform_url(match):
         url = match.group(0).strip()
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-        # MONOSNAP
         if "monosnap.ai" in url:
             match_id = re.search(r'file/([a-zA-Z0-9]+)', url)
             if match_id:
@@ -72,7 +72,6 @@ def process_image_links(text: str) -> str:
                         return f'<img src="{r.url}" style="max-width:100%;">'
                 except: pass
 
-        # TPPR.ME (PROXY)
         if "tppr.me/" in url:
             try:
                 r = requests.get(url, timeout=10, headers=headers)
@@ -83,13 +82,12 @@ def process_image_links(text: str) -> str:
                     return f'<img src="{proxy_url}" style="max-width:100%;">'
             except: pass
 
-        # Остальные (Imgur, Prntsc)
-        if any(x in url for x in ["imgur.com", "prnt.sc", "prntscr.com"]):
+        if any(x in url for x in ["imgur.com", "prnt.sc", "prntscr.com", "snipboard.io", "icecream.me"]):
             try:
                 r = requests.get(url, timeout=10, headers=headers)
                 soup = BeautifulSoup(r.text, 'lxml')
                 img = soup.find('meta', property="og:image") or soup.find('img', class_="no-click")
-                src = img.get('content') if img.get('content') else img.get('src')
+                src = img.get('content') if img and img.get('content') else (img.get('src') if img else None)
                 if src: return f'<img src="{src}" style="max-width:100%;">'
             except: pass
 
@@ -101,20 +99,55 @@ def process_image_links(text: str) -> str:
     return re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
 
 # ==============================
-# ПРЕОБРАЗОВАНИЕ В HTML
+# CLICKUP ФУНКЦИИ (ВОЗВРАЩЕНЫ)
 # ==============================
-def task_to_html(task):
-    name = task.get("name") or "(Без названия)"
-    desc = task.get("description") or ""
-    # ПРИМЕНЯЕМ НАШ ПАРСЕР СКРИНШОТОВ
-    processed_desc = process_image_links(desc)
-    body = markdown(processed_desc, extensions=['nl2br']) if desc else "<p><em>Нет описания</em></p>"
-    return f"<h1>{html.escape(name)}</h1>{body}"
+def get_folders():
+    r = cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/folder", params={"archived": "false"})
+    return r.json().get("folders", [])
+
+def get_lists_in_folder(folder_id):
+    r = cu.get(f"https://api.clickup.com/api/v2/folder/{folder_id}/list", params={"archived": "false"})
+    return r.json().get("lists", [])
+
+def get_folderless_lists():
+    r = cu.get(f"https://api.clickup.com/api/v2/space/{SPACE_ID}/list", params={"archived": "false"})
+    return r.json().get("lists", [])
+
+def get_tasks_from_list(list_id, updated_after):
+    page = 0
+    updated_gt = int(updated_after.timestamp() * 1000) if not FETCH_ALL else None
+    while True:
+        params = {"page": page, "include_subtasks": "true", "limit": 100, "include_markdown_description": "true"}
+        if updated_gt: params["updated_gt"] = updated_gt
+        if CLICKUP_ONLY_OPEN: params["statuses[]"] = ["to do", "in progress"]
+
+        r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
+        tasks = r.json().get("tasks", [])
+        if not tasks: break
+        for t in tasks: yield t
+        page += 1
+
+def fetch_clickup_tasks(updated_after):
+    count = 0
+    # Папки
+    for folder in get_folders():
+        for lst in get_lists_in_folder(folder["id"]):
+            if lst["id"] in IGNORED_LIST_IDS: continue
+            for task in get_tasks_from_list(lst["id"], updated_after):
+                if MAX_TASKS_FOR_TEST > 0 and count >= MAX_TASKS_FOR_TEST: return
+                yield task
+                count += 1
+    # Списки без папок
+    for lst in get_folderless_lists():
+        if lst["id"] in IGNORED_LIST_IDS: continue
+        for task in get_tasks_from_list(lst["id"], updated_after):
+            if MAX_TASKS_FOR_TEST > 0 and count >= MAX_TASKS_FOR_TEST: return
+            yield task
+            count += 1
 
 # ==============================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ИЗ ТВОЕГО КОДА)
+# INTERCOM ФУНКЦИИ
 # ==============================
-
 def retry_request(method, url, json=None, max_retries=5):
     for attempt in range(1, max_retries + 1):
         try:
@@ -138,70 +171,63 @@ def load_all_articles():
         for art in data.get("data", []):
             title = art.get("title", "")
             match = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
-            if match:
-                task_id_to_id[match.group(1)] = art["id"]
+            if match: task_id_to_id[match.group(1)] = art["id"]
         if page >= data.get("pages", {}).get("total_pages", 1): break
         page += 1
     return task_id_to_id
 
-# (Здесь должны быть твои функции получения папок и листов ClickUp: get_folders, get_tasks_from_list и т.д.)
-# Я пропущу их для краткости, они остаются как в твоем исходном коде.
-
-# ==============================
-# СИНХРОНИЗАЦИЯ (ОБНОВЛЕННАЯ)
-# ==============================
-
 def sync_article(task, article_map):
     task_id = task["id"]
-    title_base = task.get("name") or "(Без названия)"
-    title = f"{title_base} [{task_id}]"[:255]
-    body = task_to_html(task)[:50000]
+    name = task.get("name") or "Untitled"
+    title = f"{name} [{task_id}]"[:255]
+    desc = task.get("markdown_description") or task.get("description") or ""
+    
+    body = f"<h1>{html.escape(name)}</h1>"
+    body += markdown(process_image_links(desc), extensions=['nl2br']) if desc else "<p>Нет описания</p>"
 
     payload = {
-        "title": title,
-        "body": body,
-        "owner_id": INTERCOM_OWNER_ID,
-        "author_id": INTERCOM_AUTHOR_ID,
-        "folder_id": INTERCOM_FOLDER_ID, # Добавили папку
-        "locale": "en",
+        "title": title, "body": body[:50000],
+        "owner_id": INTERCOM_OWNER_ID, "author_id": INTERCOM_AUTHOR_ID,
+        "folder_id": INTERCOM_FOLDER_ID, "locale": "en"
     }
 
     if task_id in article_map:
         article_id = article_map[task_id]
-        # Проверка изменений
         r_get = ic.get(f"{INTERCOM_BASE}/internal_articles/{article_id}")
         if r_get.status_code == 200:
             curr = r_get.json()
             if curr.get("title") == title and curr.get("body") == body:
-                log.info(f"Без изменений: {title}")
+                log.info(f"Пропуск (нет изменений): {title}")
                 return article_id
-
-        log.info(f"Обновление статьи: {title}")
+        log.info(f"Обновление: {title}")
         r = retry_request(ic.put, f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
     else:
-        log.info(f"Создание статьи: {title}")
+        log.info(f"Создание: {title}")
         r = retry_request(ic.post, f"{INTERCOM_BASE}/internal_articles", json=payload)
 
-    if r and r.status_code in (200, 201):
-        new_id = r.json().get("id")
-        article_map[task_id] = new_id
-        return new_id
-    return None
+    return r.json().get("id") if r and r.status_code in (200, 201) else None
 
 # ==============================
-# MAIN
+# ЗАПУСК
 # ==============================
 def main():
     article_map = load_all_articles()
-    # Логика времени
-    since = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     
-    # Запуск (используем твою логику перебора fetch_clickup_tasks)
-    # ВАЖНО: Убедись, что функции fetch_clickup_tasks, get_folders и т.д. 
-    # вставлены в этот скрипт из твоего оригинала.
-    
+    # Определяем время синхронизации
+    if os.path.exists(SYNC_STATE_FILE):
+        with open(SYNC_STATE_FILE, "r") as f:
+            last_iso = json.load(f).get("last_sync_iso")
+    else: last_iso = None
+
+    since = datetime.fromisoformat(last_iso) if last_iso and not FETCH_ALL else datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    log.info(f"Синхронизация задач после {since.isoformat()}")
+
     for task in fetch_clickup_tasks(since):
         sync_article(task, article_map)
+
+    with open(SYNC_STATE_FILE, "w") as f:
+        json.dump({"last_sync_iso": datetime.now(timezone.utc).isoformat()}, f)
+    log.info("Синхронизация завершена!")
 
 if __name__ == "__main__":
     main()
