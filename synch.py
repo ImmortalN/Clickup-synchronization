@@ -1,32 +1,43 @@
 import os
+import time
+import json
 import html
 import logging
 import re
+from datetime import datetime, timedelta, timezone
+
 import requests
 from markdown import markdown
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
-load_dotenv()
-
 # ==============================
 # КОНФИГУРАЦИЯ
 # ==============================
-CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN")
-CLICKUP_LIST_ID = "ТВОЙ_LIST_ID"  # Укажи ID списка, из которого берем 10 задач
-INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
-INTERCOM_BASE = "https://api.intercom.io"
-INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID"))
-INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID"))
-INTERCOM_FOLDER_ID = 4101985
+load_dotenv()
+
+CLICKUP_TOKEN           = os.getenv("CLICKUP_API_TOKEN")
+CLICKUP_TEAM_ID         = os.getenv("CLICKUP_TEAM_ID")
+SPACE_ID                = "90125205902"
+IGNORED_LIST_IDS        = {"901212791461", "901212763746"}
+
+INTERCOM_TOKEN          = os.getenv("INTERCOM_ACCESS_TOKEN")
+INTERCOM_BASE           = os.getenv("INTERCOM_REGION", "https://api.intercom.io").rstrip("/")
+INTERCOM_OWNER_ID       = int(os.getenv("INTERCOM_OWNER_ID"))
+INTERCOM_AUTHOR_ID       = int(os.getenv("INTERCOM_AUTHOR_ID"))
+INTERCOM_FOLDER_ID      = 4101985  # Твоя папка
+
+# Параметры запуска
+LOOKBACK_HOURS          = int(os.getenv("CLICKUP_UPDATED_LOOKBACK_HOURS", "24"))
+FETCH_ALL               = os.getenv("FETCH_ALL", "false").lower() == "true"
+MAX_TASKS_FOR_TEST      = int(os.getenv("MAX_TASKS_FOR_TEST", 0))
 
 # ==============================
-# ЛОГИРОВАНИЕ
+# ЛОГИРОВАНИЕ И СЕССИИ
 # ==============================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# Сессии
 cu = requests.Session()
 cu.headers.update({"Authorization": CLICKUP_TOKEN, "Content-Type": "application/json"})
 
@@ -39,10 +50,11 @@ ic.headers.update({
 })
 
 # ==============================
-# ОБРАБОТКА СКРИНШОТОВ
+# ОБРАБОТКА СКРИНШОТОВ (ФИНАЛЬНАЯ ВЕРСИЯ)
 # ==============================
 def process_image_links(text: str) -> str:
     if not text: return text
+    # Очистка Markdown ссылок
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
     def transform_url(match):
@@ -55,25 +67,23 @@ def process_image_links(text: str) -> str:
             if match_id:
                 api_url = f"https://api.monosnap.ai/file/download?id={match_id.group(1)}"
                 try:
-                    r = requests.get(api_url, timeout=10, headers=headers, allow_redirects=True)
+                    r = requests.get(api_url, timeout=10, headers={"Referer": url}, allow_redirects=True)
                     if r.status_code == 200 and "api.monosnap.ai" not in r.url:
                         return f'<img src="{r.url}" style="max-width:100%;">'
                 except: pass
-        
-        # TPPR.ME (через прокси weserv)
+
+        # TPPR.ME (PROXY)
         if "tppr.me/" in url:
             try:
                 r = requests.get(url, timeout=10, headers=headers)
-                if r.status_code == 200:
-                    soup = BeautifulSoup(r.text, 'lxml')
-                    meta = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image:src")
-                    if meta and meta.get('content'):
-                        direct = meta['content']
-                        proxy_url = f"https://images.weserv.nl/?url={direct.replace('https://', '')}"
-                        return f'<img src="{proxy_url}" style="max-width:100%;">'
+                soup = BeautifulSoup(r.text, 'lxml')
+                meta = soup.find('meta', property="og:image") or soup.find('meta', name="twitter:image:src")
+                if meta and meta.get('content'):
+                    proxy_url = f"https://images.weserv.nl/?url={meta['content'].replace('https://', '')}"
+                    return f'<img src="{proxy_url}" style="max-width:100%;">'
             except: pass
 
-        # Остальные (Imgur, Prntsc и прямые ссылки)
+        # Остальные (Imgur, Prntsc)
         if any(x in url for x in ["imgur.com", "prnt.sc", "prntscr.com"]):
             try:
                 r = requests.get(url, timeout=10, headers=headers)
@@ -91,73 +101,107 @@ def process_image_links(text: str) -> str:
     return re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
 
 # ==============================
-# ЛОГИКА СИНХРОНИЗАЦИИ
+# ПРЕОБРАЗОВАНИЕ В HTML
+# ==============================
+def task_to_html(task):
+    name = task.get("name") or "(Без названия)"
+    desc = task.get("description") or ""
+    # ПРИМЕНЯЕМ НАШ ПАРСЕР СКРИНШОТОВ
+    processed_desc = process_image_links(desc)
+    body = markdown(processed_desc, extensions=['nl2br']) if desc else "<p><em>Нет описания</em></p>"
+    return f"<h1>{html.escape(name)}</h1>{body}"
+
+# ==============================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ИЗ ТВОЕГО КОДА)
 # ==============================
 
-def find_existing_article(task_id):
-    """Ищет статью в Intercom, у которой в заголовке есть [ID задачи]"""
-    search_query = f"[{task_id}]"
-    payload = {
-        "query": {
-            "field": "title",
-            "operator": "CONTAINS",
-            "value": search_query
-        }
-    }
-    r = ic.post(f"{INTERCOM_BASE}/internal_articles/search", json=payload)
-    if r.status_code == 200:
-        data = r.json()
-        if data.get('data'):
-            return data['data'][0]['id'] # Возвращаем ID первой найденной статьи
+def retry_request(method, url, json=None, max_retries=5):
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = method(url, json=json)
+            if r.status_code in (500, 502, 503, 504):
+                time.sleep(2 ** attempt)
+                continue
+            return r
+        except:
+            time.sleep(2 ** attempt)
     return None
 
-def sync_task_to_intercom(task):
+def load_all_articles():
+    log.info("Загрузка всех статей из Intercom...")
+    task_id_to_id = {}
+    page = 1
+    while True:
+        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 100})
+        if r.status_code != 200: break
+        data = r.json()
+        for art in data.get("data", []):
+            title = art.get("title", "")
+            match = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
+            if match:
+                task_id_to_id[match.group(1)] = art["id"]
+        if page >= data.get("pages", {}).get("total_pages", 1): break
+        page += 1
+    return task_id_to_id
+
+# (Здесь должны быть твои функции получения папок и листов ClickUp: get_folders, get_tasks_from_list и т.д.)
+# Я пропущу их для краткости, они остаются как в твоем исходном коде.
+
+# ==============================
+# СИНХРОНИЗАЦИЯ (ОБНОВЛЕННАЯ)
+# ==============================
+
+def sync_article(task, article_map):
     task_id = task["id"]
-    task_name = task.get("name", "Untitled")
-    title = f"{task_name} [{task_id}]"
-    
-    # Контент
-    desc = task.get("markdown_description") or task.get("description") or ""
-    body = f"<h1>{html.escape(task_name)}</h1>\n\n{markdown(process_image_links(desc), extensions=['nl2br'])}"
-    
-    existing_id = find_existing_article(task_id)
-    
+    title_base = task.get("name") or "(Без названия)"
+    title = f"{title_base} [{task_id}]"[:255]
+    body = task_to_html(task)[:50000]
+
     payload = {
         "title": title,
         "body": body,
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
-        "folder_id": INTERCOM_FOLDER_ID
+        "folder_id": INTERCOM_FOLDER_ID, # Добавили папку
+        "locale": "en",
     }
 
-    if existing_id:
-        # ОБНОВЛЕНИЕ
-        log.info(f"Обновление существующего гайда {existing_id} для задачи {task_id}")
-        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_id}", json=payload)
-    else:
-        # СОЗДАНИЕ
-        log.info(f"Создание нового гайда для задачи {task_id}")
-        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+    if task_id in article_map:
+        article_id = article_map[task_id]
+        # Проверка изменений
+        r_get = ic.get(f"{INTERCOM_BASE}/internal_articles/{article_id}")
+        if r_get.status_code == 200:
+            curr = r_get.json()
+            if curr.get("title") == title and curr.get("body") == body:
+                log.info(f"Без изменений: {title}")
+                return article_id
 
-    if r.status_code in (200, 201):
-        log.info(f"✅ Успех для {task_id}")
+        log.info(f"Обновление статьи: {title}")
+        r = retry_request(ic.put, f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
     else:
-        log.error(f"❌ Ошибка {task_id}: {r.text}")
+        log.info(f"Создание статьи: {title}")
+        r = retry_request(ic.post, f"{INTERCOM_BASE}/internal_articles", json=payload)
 
-def run_sync():
-    log.info("=== ЗАПУСК СИНХРОНИЗАЦИИ (ЛИМИТ 10) ===")
-    # Получаем список из 10 последних задач
-    r = cu.get(f"https://api.clickup.com/api/v2/list/{CLICKUP_LIST_ID}/task", 
-               params={"limit": 10, "include_markdown_description": "true"})
+    if r and r.status_code in (200, 201):
+        new_id = r.json().get("id")
+        article_map[task_id] = new_id
+        return new_id
+    return None
+
+# ==============================
+# MAIN
+# ==============================
+def main():
+    article_map = load_all_articles()
+    # Логика времени
+    since = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     
-    if r.status_code != 200:
-        log.error(f"Не удалось получить задачи из ClickUp: {r.text}")
-        return
-
-    tasks = r.json().get("tasks", [])
-    for task in tasks:
-        sync_task_to_intercom(task)
-    log.info("=== СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА ===")
+    # Запуск (используем твою логику перебора fetch_clickup_tasks)
+    # ВАЖНО: Убедись, что функции fetch_clickup_tasks, get_folders и т.д. 
+    # вставлены в этот скрипт из твоего оригинала.
+    
+    for task in fetch_clickup_tasks(since):
+        sync_article(task, article_map)
 
 if __name__ == "__main__":
-    run_sync()
+    main()
