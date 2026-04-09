@@ -55,31 +55,34 @@ def process_image_links(text: str) -> str:
         # ==================== MONOSNAP ====================
         if "monosnap.ai" in url:
             log.debug(f"Обработка Monosnap: {url}")
-            # Извлекаем ID из ссылки
             match = re.search(r'file/([a-zA-Z0-9]+)', url)
             if match:
                 img_id = match.group(1)
                 api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
                 
+                # Локальные заголовки, чтобы избежать ошибки 'not defined'
+                local_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+                    "Referer": url
+                }
+                
                 try:
-                    # Важный момент: добавляем Referer, чтобы обмануть защиту Monosnap
-                    custom_headers = headers.copy()
-                    custom_headers["Referer"] = url
-                    
-                    # Делаем запрос к API и смотрим, куда нас перенаправят
-                    # allow_redirects=True позволит нам получить r.url — конечный адрес файла
-                    r = requests.get(api_url, timeout=10, headers=custom_headers, allow_redirects=True)
+                    # Делаем запрос к API, чтобы получить финальный URL файла после редиректа
+                    # Monosnap перенаправит нас на store.monosnap.com или s3
+                    r = requests.get(api_url, timeout=15, headers=local_headers, allow_redirects=True)
                     
                     if r.status_code == 200:
                         direct = r.url
-                        # Если редирект сработал и ссылка ведет на хранилище (store или s3)
+                        # Если мы ушли с домена api.monosnap.ai — значит, получили прямую ссылку на файл
                         if "api.monosnap.ai" not in direct:
-                            log.debug(f"--- УСПЕХ MONOSNAP --- Прямой URL файла: {direct}")
+                            log.debug(f"--- УСПЕХ MONOSNAP --- Прямой URL: {direct}")
                             return f'<img src="{direct}" style="max-width:100%;">'
                         else:
-                            log.warning("Monosnap вернул API ссылку вместо файла")
+                            log.warning("Не удалось получить редирект на файл, остался API URL")
+                    else:
+                        log.warning(f"API Monosnap ответило кодом {r.status_code}")
                 except Exception as e:
-                    log.error(f"Ошибка получения файла Monosnap: {e}")
+                    log.error(f"Ошибка при получении прямой ссылки Monosnap: {e}")
             
             return original
             
