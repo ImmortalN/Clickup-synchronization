@@ -62,41 +62,58 @@ ic.headers.update({
 # ==============================
 
 def process_image_links(text):
-    """
-    Превращает текстовые ссылки скриншотеров в HTML теги <img>.
-    """
     if not text:
         return text
 
-    # 1. Icecream: http://icecream.me/ID -> прямой путь к .png
-    text = re.sub(
-        r'https?://(?:www\.)?icecream\.me/([a-zA-Z0-9]+)', 
-        r'<img src="https://icecream.me/uploads/\1.png" style="max-width:100%; display:block; margin:10px 0;" />', 
-        text
-    )
+    # Разделяем текст на строки, чтобы ссылки не слипались
+    lines = text.splitlines()
+    processed_lines = []
 
-    # 2. Lightshot (prnt.sc): если ссылка уже содержит image.prntscr.com
-    text = re.sub(
-        r'https?://image\.prntscr\.com/image/([a-zA-Z0-9_-]+)\.png',
-        r'<img src="https://image.prntscr.com/image/\1.png" style="max-width:100%;" />',
-        text
-    )
+    for line in lines:
+        new_line = line.strip()
+        if not new_line:
+            processed_lines.append("")
+            continue
 
-    # 3. Imgur: превращаем ссылки на страницы в прямые ссылки на картинки (i.imgur...)
-    # Обрабатываем вариант https://imgur.com/a/ID -> берем первую картинку (условно)
-    # Но лучше всего работают прямые:
-    text = re.sub(
-        r'https?://i\.imgur\.com/([a-zA-Z0-9]+)\.(png|jpg|jpeg|gif)',
-        r'<img src="https://i.imgur.com/\1.\2" style="max-width:100%;" />',
-        text
-    )
+        # 1. Icecream (Уже работает)
+        if "icecream.me/" in new_line:
+            new_line = re.sub(r'https?://(?:www\.)?icecream\.me/([a-zA-Z0-9]+)', 
+                              r'<img src="https://icecream.me/uploads/\1.png" style="max-width:100%;" />', new_line)
 
-    # 4. Прямые ссылки (GitHub, Snipboard, и любые .png/.jpg/.jpeg)
-    # Ищем ссылки, которые заканчиваются на расширение, но еще не обернуты в теги
-    direct_pattern = r'(?<!src=")(https?://[^\s\)]+\.(?:png|jpg|jpeg|gif))'
-    text = re.sub(direct_pattern, r'<img src="\1" style="max-width:100%;" />', text)
+        # 2. Imgur (Альбомы -> прямая ссылка)
+        # Превращаем https://imgur.com/a/abc в https://i.imgur.com/abc.png
+        elif "imgur.com/a/" in new_line:
+            new_line = re.sub(r'https?://(?:www\.)?imgur\.com/a/([a-zA-Z0-9]+)', 
+                              r'<img src="https://i.imgur.com/\1.png" style="max-width:100%;" />', new_line)
 
-    return text
+        # 3. Tppr.me (Topor)
+        # Превращаем https://tppr.me/abc в https://media.tppr.me/uploads/abc.jpg (обычно там такой паттерн)
+        # ВНИМАНИЕ: tppr часто меняет хеши, это "угадывание". Если не сработает - только ручная замена.
+        elif "tppr.me/" in new_line:
+            new_line = re.sub(r'https?://tppr\.me/([a-zA-Z0-9]+)', 
+                              r'<img src="https://media.tppr.me/uploads/\1.jpg" style="max-width:100%;" />', new_line)
+
+        # 4. Snipboard / GitHub / Прямые ссылки на изображения
+        # Если строка - это просто ссылка заканчивающаяся на расширение
+        elif re.search(r'\.(png|jpg|jpeg|gif|webp)$', new_line.lower()):
+            new_line = f'<img src="{new_line}" style="max-width:100%;" />'
+
+        # 5. Monosnap
+        # Превращаем https://monosnap.ai/file/abc в https://api.monosnap.ai/file/download?id=abc
+        elif "monosnap.ai/file/" in new_line:
+            new_line = re.sub(r'https?://monosnap\.ai/file/([a-zA-Z0-9]+)', 
+                              r'<img src="https://api.monosnap.ai/file/download?id=\1" style="max-width:100%;" />', new_line)
+
+        # 6. Lightshot (prnt.sc) - САМЫЙ ПРОБЛЕМНЫЙ
+        # Прямой конвертации нет, сервис блокирует встраивание. Оставляем ссылкой или пробуем:
+        elif "prnt.sc/" in new_line:
+            # Мы не можем угадать прямой URL, так как он на другом домене с другим ID.
+            # Оставляем как есть, чтобы не ломать верстку.
+            pass
+
+        processed_lines.append(new_line)
+
+    return "\n".join(processed_lines)
 
 # ==============================
 # УТИЛИТЫ И CLICKUP API (Твой исходный код)
