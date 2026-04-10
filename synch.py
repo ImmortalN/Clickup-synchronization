@@ -45,15 +45,24 @@ ic.headers.update({
 # ==============================
 def process_image_links(text: str) -> str:
     if not text: return text
-    # 1. Убираем markdown-разметку ссылок, оставляя только URL
+    # 1. Очищаем markdown-разметку, оставляя только голые URL
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
     def transform_url(match):
         url = match.group(0).strip()
         original = url
         
-        # --- ПРИОРУТЕТ 1: ПРЯМЫЕ ССЫЛКИ ---
-        # Если ссылка уже ведет на файл, отдаем её сразу, не заходя на сайт
+        # --- СПЕЦОБРАБОТКА SNIPBOARD ---
+        # Если ссылка со snipboard, мы принудительно добавляем 'i.' и '.jpg'
+        # Это превращает страницу в прямую ссылку на файл, которую Intercom ест лучше
+        if "snipboard.io" in url and "i.snipboard.io" not in url:
+            # Вырезаем ID картинки (все что после последнего слеша)
+            img_id = url.split('/')[-1]
+            if img_id:
+                direct_url = f"https://i.snipboard.io/{img_id}.jpg"
+                return f'<img src="{direct_url}" style="max-width:100%;">'
+
+        # --- ПРИОРИТЕТ 1: ПРЯМЫЕ ССЫЛКИ (уже с расширением) ---
         if re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()):
             return f'<img src="{url}" style="max-width:100%;">'
 
@@ -65,6 +74,7 @@ def process_image_links(text: str) -> str:
                     r_head = requests.head(url, timeout=5, allow_redirects=True)
                     current_url = r_head.url
                 except: pass
+            
             match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
             if match_id:
                 img_id = match_id.group(1)
@@ -76,8 +86,8 @@ def process_image_links(text: str) -> str:
                 except: pass
             return original
 
-        # --- ПРИОРИТЕТ 3: ПАРСИНГ СТРАНИЦ (только если это не прямая ссылка) ---
-        if any(x in url for x in ["imgur.com", "prnt.sc", "prntscr.com", "snipboard.io", "icecream.me"]):
+        # --- ПРИОРИТЕТ 3: ПАРСИНГ СТРАНИЦ (imgur, prnt.sc и т.д.) ---
+        if any(x in url for x in ["imgur.com", "prnt.sc", "prntscr.com", "icecream.me"]):
             try:
                 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
                 r = requests.get(url, timeout=10, headers=headers)
