@@ -15,7 +15,7 @@ load_dotenv()
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN")
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = "https://api.intercom.io"
-INTERCOM_VERSION = "unstable" 
+INTERCOM_VERSION = "Unstable"
 
 OLD_FOLDER_ID = 2600835  
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID"))
