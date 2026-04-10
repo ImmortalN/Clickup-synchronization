@@ -8,6 +8,7 @@ import requests
 from markdown import markdown
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+from datetime import datetime
 
 # ==============================
 # КОНФИГУРАЦИЯ
