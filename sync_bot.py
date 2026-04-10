@@ -4,10 +4,8 @@ import time
 import html
 import logging
 import re
-import json
 import requests
 from markdown import markdown
-from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
@@ -21,16 +19,13 @@ INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = "https://api.intercom.io"
 INTERCOM_VERSION = "Unstable"
 
-# Значения по умолчанию
 DEFAULT_FOLDER_ID = 4101985
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
-SYNC_STATE_FILE = ".sync_state.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# Сессии
 cu = requests.Session()
 cu.headers.update({"Authorization": CLICKUP_TOKEN, "Content-Type": "application/json"})
 
@@ -43,7 +38,7 @@ ic.headers.update({
 })
 
 # ==============================
-# ЛОГИКА ОБРАБОТКИ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==============================
 
 def process_image_links(text: str) -> str:
@@ -89,12 +84,73 @@ def get_clickup_task(task_id):
     except: pass
     return None
 
-def main():
-    # Проверяем аргумент папки при запуске
-    target_folder = str(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].strip() else str(DEFAULT_FOLDER_ID)
-    is_force_mode = len(sys.argv) > 1
+def sync_single_article(art, is_force=True):
+    """Логика обновления одной конкретной статьи"""
+    article_id = art["id"]
+    title = art.get("title", "")
+    current_folder = art.get("parent_id") or art.get("folder_id")
     
-    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ (Folder: {target_folder}, Force: {is_force_mode}) ---")
+    match = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
+    if not match: return False
+    
+    task_id = match.group(1)
+    task_data = get_clickup_task(task_id)
+
+    if task_data == "DELETED":
+        log.warning(f"🗑️ Задача {task_id} удалена. Чистим Intercom...")
+        ic.delete(f"{INTERCOM_BASE}/internal_articles/{article_id}")
+        return True
+
+    if task_data:
+        name = task_data.get("name")
+        desc = task_data.get("markdown_description") or task_data.get("description") or ""
+        
+        new_title = f"{name} [{task_id}]"[:255]
+        body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
+        new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
+
+        if not is_force:
+            if art.get("title") == new_title and art.get("body") == new_body:
+                return False
+
+        log.info(f"🔄 Обновление: {name}")
+        payload = {
+            "title": new_title,
+            "body": new_body[:50000],
+            "owner_id": INTERCOM_OWNER_ID,
+            "author_id": INTERCOM_AUTHOR_ID,
+            "folder_id": current_folder
+        }
+        ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
+        return True
+    return False
+
+# ==============================
+# ГЛАВНЫЙ ПРОЦЕСС
+# ==============================
+
+def main():
+    # Читаем аргументы: 1 - ID папки, 2 - Список ID статей
+    target_folder = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else None
+    specific_ids = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
+
+    # ВАРИАНТ 4: Точечное обновление по ID статей
+    if specific_ids:
+        ids = [i.strip() for i in specific_ids.split(",")]
+        log.info(f"--- РЕЖИМ ТОЧЕЧНОГО ОБНОВЛЕНИЯ: {len(ids)} шт. ---")
+        for aid in ids:
+            res = ic.get(f"{INTERCOM_BASE}/internal_articles/{aid}")
+            if res.status_code == 200:
+                sync_single_article(res.json(), is_force=True)
+            else:
+                log.error(f"Статья {aid} не найдена в Intercom.")
+        return
+
+    # ВАРИАНТЫ 1, 2, 3: Работа по папке
+    folder_to_scan = target_folder or str(DEFAULT_FOLDER_ID)
+    is_force = target_folder is not None # Если указали папку вручную, обновляем всё принудительно
+    
+    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ (Folder: {folder_to_scan}, Force: {is_force}) ---")
 
     page = 1
     while True:
@@ -106,46 +162,9 @@ def main():
         if not articles: break
 
         for art in articles:
-            article_id = art["id"]
-            title = art.get("title", "")
             current_folder = str(art.get("parent_id") or art.get("folder_id") or "")
-
-            if current_folder != target_folder:
-                continue
-
-            match = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
-            if not match: continue
-            
-            task_id = match.group(1)
-            task_data = get_clickup_task(task_id)
-
-            if task_data == "DELETED":
-                log.warning(f"🗑️ Задача {task_id} удалена. Чистим Intercom...")
-                ic.delete(f"{INTERCOM_BASE}/internal_articles/{article_id}")
-                continue
-
-            if task_data:
-                name = task_data.get("name")
-                desc = task_data.get("markdown_description") or task_data.get("description") or ""
-                
-                new_title = f"{name} [{task_id}]"[:255]
-                body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
-                new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
-
-                # Если не форсированный режим, проверяем изменения
-                if not is_force_mode:
-                    if art.get("title") == new_title and art.get("body") == new_body:
-                        continue
-
-                log.info(f"🔄 Обновление: {name}")
-                payload = {
-                    "title": new_title,
-                    "body": new_body[:50000],
-                    "owner_id": INTERCOM_OWNER_ID,
-                    "author_id": INTERCOM_AUTHOR_ID,
-                    "folder_id": int(target_folder)
-                }
-                ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
+            if current_folder == folder_to_scan:
+                sync_single_article(art, is_force=is_force)
 
         if page >= data.get("pages", {}).get("total_pages", 1): break
         page += 1
