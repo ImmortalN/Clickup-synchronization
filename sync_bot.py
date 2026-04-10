@@ -130,6 +130,11 @@ def sync_single_article(art, is_force=True):
 # ==============================
 
 def main():
+    if len(sys.argv) == 1: 
+        week_number = datetime.now().isocalendar()[1]
+        if week_number % 2 != 0:
+            log.info("Сегодня нечетная неделя. Пропускаем автоматическую синхронизацию (раз в 2 недели).")
+            return
     # Читаем аргументы: 1 - ID папки, 2 - Список ID статей
     target_folder = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else None
     specific_ids = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
