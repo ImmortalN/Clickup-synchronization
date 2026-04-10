@@ -1,20 +1,19 @@
 name: ClickUp Intercom Sync Bot
 
 on:
-  # 1, 3 и 4: Ручной запуск с выбором параметров
   workflow_dispatch:
     inputs:
       folder_id:
-        description: 'ID папки (Варианты 1-3). Оставьте пустым для папки по умолчанию'
+        description: 'ID папки (Варианты 1-3)'
         required: false
         default: ''
       article_ids:
-        description: 'ID статей через запятую (Вариант 4). Если заполнено, folder_id игнорируется'
+        description: 'ID статей через запятую (Вариант 4)'
         required: false
         default: ''
 
-  # 2: Автоматически каждую субботу в 00:00 UTC
   schedule:
+    # Запускаем каждую субботу (проверка "раз в 2 недели" теперь внутри Python)
     - cron: '0 0 * * 6'
 
 jobs:
@@ -32,12 +31,30 @@ jobs:
       - name: Install dependencies
         run: pip install requests markdown python-dotenv beautifulsoup4 lxml
 
-      - name: Run script
+      - name: Run script and save log
         env:
           CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
           INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
           INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
           INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
         run: |
-          # Теперь мы передаем два аргумента: ID папки и ID статей
-          python sync_bot.py "${{ github.event.inputs.folder_id }}" "${{ github.event.inputs.article_ids }}"
+          # Запускаем и записываем всё (и ошибки, и инфо) в файл sync.log
+          python sync_bot.py "${{ github.event.inputs.folder_id }}" "${{ github.event.inputs.article_ids }}" 2>&1 | tee sync.log
+
+      - name: Send mail
+        if: always() # Отправлять даже если скрипт упал с ошибкой
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: Intercom Sync Report (${{ github.run_id }})
+          to: ВАША_ПОЧТА@gmail.com # <--- ЗАМЕНИТЕ НА СВОЙ EMAIL
+          from: GitHub Actions Sync
+          body: |
+            Синхронизация завершена. 
+            Статус: ${{ job.status }}
+            
+            Логи выполнения прикреплены к письму.
+          attachments: sync.log
