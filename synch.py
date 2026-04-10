@@ -181,3 +181,6 @@ def force_update():
         time.sleep(0.2) # Чтобы не спамить API
 
     log.info(f"Миграция завершена. Всего обновлено статей: {total_processed}")
+
+if __name__ == "__main__":
+    force_update()
