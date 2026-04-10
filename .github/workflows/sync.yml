@@ -50,7 +50,7 @@ jobs:
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: Intercom Sync Report (${{ github.run_id }})
-          to: ВАША_ПОЧТА@gmail.com # <--- ЗАМЕНИТЕ НА СВОЙ EMAIL
+          to: immortal@jetmonsters.me
           from: GitHub Actions Sync
           body: |
             Синхронизация завершена. 
