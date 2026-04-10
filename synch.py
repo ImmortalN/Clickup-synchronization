@@ -108,51 +108,76 @@ def get_clickup_task_description(task_id):
     return None, None
 
 def force_update():
-    articles = get_articles_from_folder(OLD_FOLDER_ID)
+    log.info(f"Загрузка всех статей для фильтрации по папке {OLD_FOLDER_ID}...")
     
-    for art in articles:
-        article_id = art["id"]
-        title = art["title"]
+    page = 1
+    total_processed = 0
+    
+    while True:
+        # Получаем список всех внутренних статей (как в твоем рабочем скрипте)
+        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
         
-        # Вытаскиваем Task ID из заголовка [task_id]
-        match = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
-        if not match:
-            log.warning(f"Пропуск: В заголовке '{title}' не найден ID задачи ClickUp")
-            continue
+        if r.status_code != 200:
+            log.error(f"Ошибка при загрузке страницы {page}: {r.text}")
+            break
             
-        task_id = match.group(1)
-        log.info(f"Принудительное обновление статьи {article_id} (Task: {task_id})")
+        data = r.json()
+        articles = data.get("data", [])
         
-        # 1. Берем данные из ClickUp
-        task_name, desc = get_clickup_task_description(task_id)
-        if not task_name:
-            log.error(f"Не удалось найти задачу {task_id} в ClickUp")
-            continue
-            
-        # 2. Формируем новый HTML (с исправленными картинками и кодом)
-        header_html = f"<h1>{html.escape(task_name)}</h1>"
-        main_content = markdown(
-            process_image_links(desc), 
-            extensions=['fenced_code', 'nl2br', 'tables']
-        )
-        new_body = f"{header_html}{main_content}"
-        
-        # 3. Отправляем в Intercom (БЕЗ проверки на изменения)
-        payload = {
-            "title": f"{task_name} [{task_id}]"[:255],
-            "body": new_body[:50000],
-            "owner_id": INTERCOM_OWNER_ID,
-            "author_id": INTERCOM_AUTHOR_ID,
-            "folder_id": OLD_FOLDER_ID  # Оставляем в той же папке или меняем на TARGET_FOLDER_ID
-        }
-        
-        update_r = ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
-        if update_r.status_code == 200:
-            log.info(f"✅ Статья '{task_name}' успешно обновлена")
-        else:
-            log.error(f"❌ Ошибка обновления статьи {article_id}: {update_r.text}")
-        
-        time.sleep(0.5) # Небольшая пауза для лимитов API
+        if not articles:
+            break
 
-if __name__ == "__main__":
-    force_update()
+        for art in articles:
+            # ПРОВЕРКА: Если статья не в той папке, которую мы чиним — пропускаем
+            if art.get("folder_id") != OLD_FOLDER_ID:
+                continue
+
+            article_id = art["id"]
+            title = art["title"]
+            
+            # Вытаскиваем Task ID
+            match = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
+            if not match:
+                continue
+                
+            task_id = match.group(1)
+            log.info(f"Найдена статья в папке {OLD_FOLDER_ID}: {title} (ID: {article_id})")
+            
+            # 1. Берем описание из ClickUp
+            task_name, desc = get_clickup_task_description(task_id)
+            if not task_name:
+                log.warning(f"Задача {task_id} не найдена в ClickUp, пропускаем.")
+                continue
+                
+            # 2. Формируем HTML
+            header_html = f"<h1>{html.escape(task_name)}</h1>"
+            main_content = markdown(
+                process_image_links(desc), 
+                extensions=['fenced_code', 'nl2br', 'tables']
+            )
+            new_body = f"{header_html}{main_content}"
+            
+            # 3. Принудительно обновляем
+            payload = {
+                "title": f"{task_name} [{task_id}]"[:255],
+                "body": new_body[:50000],
+                "owner_id": INTERCOM_OWNER_ID,
+                "author_id": INTERCOM_AUTHOR_ID,
+                "folder_id": OLD_FOLDER_ID 
+            }
+            
+            upd = ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
+            if upd.status_code == 200:
+                log.info(f"✅ Успешно обновлено: {task_name}")
+                total_processed += 1
+            else:
+                log.error(f"❌ Ошибка обновления {article_id}: {upd.text}")
+
+        # Проверка следующей страницы
+        total_pages = data.get("pages", {}).get("total_pages", 1)
+        if page >= total_pages:
+            break
+        page += 1
+        time.sleep(0.2) # Чтобы не спамить API
+
+    log.info(f"Миграция завершена. Всего обновлено статей: {total_processed}")
