@@ -45,10 +45,19 @@ ic.headers.update({
 # ==============================
 def process_image_links(text: str) -> str:
     if not text: return text
+    # 1. Убираем markdown-разметку ссылок, оставляя только URL
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
+
     def transform_url(match):
         url = match.group(0).strip()
         original = url
+        
+        # --- ПРИОРУТЕТ 1: ПРЯМЫЕ ССЫЛКИ ---
+        # Если ссылка уже ведет на файл, отдаем её сразу, не заходя на сайт
+        if re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()):
+            return f'<img src="{url}" style="max-width:100%;">'
+
+        # --- ПРИОРИТЕТ 2: MONOSNAP & TAKE.MS ---
         if "monosnap.ai" in url or "take.ms" in url:
             current_url = url
             if "take.ms" in url:
@@ -66,9 +75,20 @@ def process_image_links(text: str) -> str:
                         return f'<img src="{r.url}" style="max-width:100%;">'
                 except: pass
             return original
-        if re.search(r'\.(png|jpe?g|gif|webp|bmp)', url.lower()):
-            return f'<img src="{url}" style="max-width:100%;">'
+
+        # --- ПРИОРИТЕТ 3: ПАРСИНГ СТРАНИЦ (только если это не прямая ссылка) ---
+        if any(x in url for x in ["imgur.com", "prnt.sc", "prntscr.com", "snipboard.io", "icecream.me"]):
+            try:
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                r = requests.get(url, timeout=10, headers=headers)
+                soup = BeautifulSoup(r.text, 'lxml')
+                img = soup.find('meta', property="og:image") or soup.find('img', class_="no-click")
+                src = img.get('content') if img and img.get('content') else (img.get('src') if img else None)
+                if src: return f'<img src="{src}" style="max-width:100%;">'
+            except: pass
+        
         return original
+
     return re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
 
 def get_clickup_task_description(task_id):
