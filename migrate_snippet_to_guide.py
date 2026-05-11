@@ -17,6 +17,7 @@ INTERCOM_VERSION = "Unstable"
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
 
+# ID папки для гайдов
 TARGET_FOLDER_ID = 2751260
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -31,10 +32,11 @@ ic.headers.update({
 })
 
 # ==============================
-# ПАРСЕР ХТМЛ
+# ПАРСЕР КОНТЕНТА
 # ==============================
 
 def parse_intercom_blocks(blocks):
+    """Преобразование JSON-блоков в HTML"""
     html_output = ""
     for block in blocks:
         b_type = block.get("type")
@@ -59,83 +61,100 @@ def parse_intercom_blocks(blocks):
     return html_output
 
 # ==============================
-# ОСНОВНАЯ ЛОГИКА
+# ОСНОВНОЙ ПРОЦЕСС
 # ==============================
 
-def fetch_all_snippets():
-    """Получает список всех сниппетов в аккаунте"""
-    log.info("🔍 Получение списка всех сниппетов...")
-    all_snippets = []
+def run_migration():
+    log.info("🚀 Запуск полной миграции с удалением сниппетов...")
+    
     url = f"{INTERCOM_BASE}/content_snippets"
+    params = {"per_page": 50}
     
-    while url:
-        res = ic.get(url)
-        if res.status_code != 200:
-            log.error(f"Не удалось получить список сниппетов: {res.text}")
-            break
-        
-        data = res.json()
-        all_snippets.extend(data.get("data", []))
-        
-        # Обработка пагинации
-        pages = data.get("pages", {})
-        url = pages.get("next")
-        
-    log.info(f"Найдено сниппетов: {len(all_snippets)}")
-    return all_snippets
+    processed_count = 0
 
-def migrate_all():
-    snippets = fetch_all_snippets()
-    
-    for snip_summary in snippets:
-        snippet_id = snip_summary["id"]
-        
-        # 1. Получаем полные данные каждого сниппета
-        log.info(f"--- Обработка сниппета ID: {snippet_id} ---")
-        res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
-        
+    while True:
+        res = ic.get(url, params=params)
         if res.status_code != 200:
-            log.error(f"❌ Не удалось получить данные сниппета {snippet_id}: {res.text}")
-            continue
+            log.error(f"❌ Ошибка получения списка: {res.text}")
+            break
             
-        snippet_data = res.json()
-        title = snippet_data.get("title") or snippet_data.get("name") or f"Snippet {snippet_id}"
-        json_blocks_raw = snippet_data.get("json_blocks")
+        data = res.json()
+        snippets = data.get("data", [])
         
-        if not json_blocks_raw:
-            log.warning(f"⚠️ У сниппета '{title}' нет json_blocks. Пропускаем.")
-            continue
+        if not snippets:
+            log.info("Список сниппетов пуст.")
+            break
+
+        for snip_summary in snippets:
+            snippet_id = snip_summary["id"]
             
-        try:
-            blocks = json.loads(json_blocks_raw)
-        except:
-            log.error(f"❌ Ошибка парсинга JSON для сниппета '{title}'")
-            continue
+            # 1. Получаем полные данные сниппета
+            full_res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+            if full_res.status_code != 200:
+                log.error(f"⚠️ Ошибка получения ID {snippet_id}, пропускаем.")
+                continue
+                
+            snip = full_res.json()
+            title = snip.get("title") or snip.get("name") or "Untitled"
+            json_blocks_raw = snip.get("json_blocks")
             
-        html_content = parse_intercom_blocks(blocks)
+            if not json_blocks_raw:
+                continue
+
+            try:
+                blocks = json.loads(json_blocks_raw)
+                html_body = parse_intercom_blocks(blocks)
+            except:
+                log.error(f"❌ Ошибка парсинга JSON в сниппете '{title}'")
+                continue
+
+            # 2. Создаем гайд
+            payload = {
+                "title": title,
+                "body": html_body,
+                "owner_id": INTERCOM_OWNER_ID,
+                "author_id": INTERCOM_AUTHOR_ID,
+                "folder_id": int(TARGET_FOLDER_ID),
+                "parent_id": int(TARGET_FOLDER_ID),
+                "parent_type": "folder",
+                "state": "published"
+            }
+            
+            create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+            
+            if create_res.status_code in [200, 201]:
+                processed_count += 1
+                log.info(f"✅ [{processed_count}] Создан гайд: {title}")
+                
+                # 3. Удаляем сниппет после успешного создания гайда
+                del_res = ic.delete(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+                
+                if del_res.status_code == 204:
+                    log.info(f"🗑️ Сниппет '{title}' удален.")
+                elif del_res.status_code == 422 and "content_has_procedure_dependencies" in del_res.text:
+                    log.warning(f"⚠️ Нельзя удалить '{title}': используется в Fin Procedures.")
+                else:
+                    log.error(f"❌ Ошибка удаления сниппета '{title}': {del_res.status_code}")
+            else:
+                log.error(f"❌ Ошибка создания гайда '{title}': {create_res.text}")
+            
+            time.sleep(0.3)
+
+        # 4. Логика перехода к следующей странице (Cursor Pagination)
+        pagination = data.get("pages", {})
+        next_page = pagination.get("next")
         
-        # 2. Создаем гайд
-        log.info(f"📤 Создание гайда: '{title}'...")
-        payload = {
-            "title": title,
-            "body": html_content,
-            "owner_id": INTERCOM_OWNER_ID,
-            "author_id": INTERCOM_AUTHOR_ID,
-            "folder_id": int(TARGET_FOLDER_ID),
-            "parent_id": int(TARGET_FOLDER_ID),
-            "parent_type": "folder",
-            "state": "published"
-        }
-        
-        create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
-        
-        if create_res.status_code in [200, 201]:
-            log.info(f"✅ Успешно! ID нового гайда: {create_res.json().get('id')}")
+        # В некоторых версиях API next это объект с starting_after, в других - прямая ссылка
+        if isinstance(next_page, dict) and next_page.get("starting_after"):
+            params["starting_after"] = next_page.get("starting_after")
+            log.info(f"--- Переход к следующей странице (курсор: {params['starting_after']}) ---")
+        elif isinstance(next_page, str) and next_page != "":
+            # Если это прямая ссылка
+            url = next_page
+            params = {} # Параметры уже в ссылке
         else:
-            log.error(f"❌ Ошибка при создании гайда '{title}': {create_res.text}")
-            
-        # Небольшая пауза, чтобы не упереться в лимиты API Intercom
-        time.sleep(0.3)
+            log.info("🏁 Все сниппеты обработаны.")
+            break
 
 if __name__ == "__main__":
-    migrate_all()
+    run_migration()
