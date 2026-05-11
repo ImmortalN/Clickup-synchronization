@@ -4,33 +4,21 @@ import requests
 from dotenv import load_dotenv
 
 # ==============================
-# CONFIG
+# КОНФИГУРАЦИЯ
 # ==============================
 load_dotenv()
 
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
-
 INTERCOM_BASE = "https://api.intercom.io"
-INTERCOM_VERSION = "Unstable"
-
-SNIPPET_ID = 2806960
-TARGET_FOLDER_ID = 2751260
+INTERCOM_VERSION = "Unstable"  # Для работы с Internal Articles часто требуется Unstable или 2.11+
 
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s: %(message)s"
-)
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# ==============================
-# SESSION
-# ==============================
 ic = requests.Session()
-
 ic.headers.update({
     "Authorization": f"Bearer {INTERCOM_TOKEN}",
     "Accept": "application/json",
@@ -39,149 +27,78 @@ ic.headers.update({
 })
 
 # ==============================
-# HELPERS
+# ФУНКЦИИ КОНВЕРТАЦИИ
 # ==============================
 
-def get_snippet(snippet_id):
-    r = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
-
-    if r.status_code != 200:
-        raise Exception(
-            f"Failed to fetch snippet: {r.status_code} {r.text}"
-        )
-
-    return r.json()
-
-
-def json_blocks_to_html(json_blocks):
-    """
-    VERY simplified converter.
-    Handles:
-    - paragraph
-    - heading
-    - list
-    - code
-    """
-
-    html_parts = []
-
-    for block in json_blocks:
-
+def json_blocks_to_html(blocks):
+    """Конвертирует json_blocks Intercom в HTML строку"""
+    html_output = ""
+    for block in blocks:
         block_type = block.get("type")
+        content = block.get("content", "")
 
-        # Paragraph
         if block_type == "paragraph":
-            text = block.get("text", "")
-            html_parts.append(f"<p>{text}</p>")
-
-        # Heading
+            html_output += f"<p>{content}</p>"
         elif block_type == "heading":
-            text = block.get("text", "")
-            level = block.get("level", 2)
-            html_parts.append(f"<h{level}>{text}</h{level}>")
-
-        # Bullet list
-        elif block_type == "list":
-            items = block.get("items", [])
-
-            list_html = "<ul>"
-
-            for item in items:
-                list_html += f"<li>{item}</li>"
-
-            list_html += "</ul>"
-
-            html_parts.append(list_html)
-
-        # Code
+            html_output += f"<h2>{content}</h2>"
+        elif block_type == "unordered_list":
+            items = "".join([f"<li>{item}</li>" for item in block.get("items", [])])
+            html_output += f"<ul>{items}</ul>"
+        elif block_type == "ordered_list":
+            items = "".join([f"<li>{item}</li>" for item in block.get("items", [])])
+            html_output += f"ol>{items}</ol>"
         elif block_type == "code":
-            code = block.get("text", "")
-            html_parts.append(
-                f"<pre><code>{code}</code></pre>"
-            )
+            html_output += f"<pre><code>{content}</code></pre>"
+        # Можно добавить другие типы (image, button) при необходимости
+    return html_output
 
-        # Fallback
-        else:
-            text = block.get("text")
-
-            if text:
-                html_parts.append(f"<p>{text}</p>")
-
-    return "\n".join(html_parts)
-
-
-def create_internal_article(title, body_html):
-    payload = {
-        "title": title,
-        "body": body_html,
-        "folder_id": TARGET_FOLDER_ID,
-        "owner_id": INTERCOM_OWNER_ID,
-        "author_id": INTERCOM_AUTHOR_ID
-    }
-
-    r = ic.post(
-        f"{INTERCOM_BASE}/internal_articles",
-        json=payload
-    )
-
-    if r.status_code not in [200, 201]:
-        raise Exception(
-            f"Failed to create article: "
-            f"{r.status_code} {r.text}"
-        )
-
-    return r.json()
-
-
-def delete_snippet(snippet_id):
-    r = ic.delete(
-        f"{INTERCOM_BASE}/content_snippets/{snippet_id}"
-    )
-
-    if r.status_code == 204:
-        log.info(f"Snippet {snippet_id} deleted")
+def process_conversion(snippet_id, folder_id):
+    # 1. Получаем сниппет
+    log.info(f"📥 Получение сниппета {snippet_id}...")
+    res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+    if res.status_code != 200:
+        log.error(f"Не удалось найти сниппет: {res.text}")
         return
 
-    raise Exception(
-        f"Failed to delete snippet: "
-        f"{r.status_code} {r.text}"
-    )
+    snippet_data = res.json()
+    title = snippet_data.get("name")
+    # Сниппеты хранят контент в body.content_blocks
+    blocks = snippet_data.get("body", {}).get("content_blocks", [])
+    
+    # 2. Конвертируем в HTML
+    html_body = json_blocks_to_html(blocks)
+    if not html_body:
+        # Если блоки пустые, пробуем взять из value (иногда в старых API)
+        html_body = snippet_data.get("value", "")
 
-# ==============================
-# MAIN
-# ==============================
-
-def main():
-
-    log.info(f"Fetching snippet {SNIPPET_ID}")
-
-    snippet = get_snippet(SNIPPET_ID)
-
-    title = snippet.get("title", "Untitled")
-
-    json_blocks = snippet.get("json_blocks", [])
-
-    log.info("Converting json_blocks to HTML")
-
-    body_html = json_blocks_to_html(json_blocks)
-
-    log.info("Creating internal article")
-
-    article = create_internal_article(
-        title=title,
-        body_html=body_html
-    )
-
-    log.info(
-        f"Created article ID: {article.get('id')}"
-    )
-
-    log.info("Deleting original snippet")
-
-    delete_snippet(SNIPPET_ID)
-
-    log.info("Done")
-
+    # 3. Создаем Internal Guide
+    log.info(f"📤 Создание Internal Guide: {title}...")
+    payload = {
+        "title": title,
+        "body": html_body,
+        "author_id": INTERCOM_AUTHOR_ID,
+        "parent_id": int(folder_id), # В API internal_articles используется parent_id или folder_id
+        "parent_type": "folder"
+    }
+    
+    create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+    
+    if create_res.status_code in [200, 201]:
+        new_guide = create_res.json()
+        log.info(f"✅ Гайд создан! ID: {new_guide.get('id')}")
+        
+        # 4. Удаляем сниппет
+        log.info(f"🗑️ Удаление сниппета {snippet_id}...")
+        del_res = ic.delete(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+        
+        if del_res.status_code == 204:
+            log.info("✨ Сниппет успешно удален.")
+        else:
+            log.warning(f"⚠️ Гайд создан, но сниппет не удален: {del_res.status_code} {del_res.text}")
+    else:
+        log.error(f"❌ Ошибка создания гайда: {create_res.status_code} {create_res.text}")
 
 if __name__ == "__main__":
-    main()
+    TEST_SNIPPET_ID = "2806960"
+    TARGET_FOLDER_ID = "2751260"
+    process_conversion(TEST_SNIPPET_ID, TARGET_FOLDER_ID)
