@@ -49,26 +49,37 @@ def json_blocks_to_html(blocks):
             html_output += f"<pre><code>{content}</code></pre>"
     return html_output
 
-def migrate():
+ddef migrate():
     snippet_id = "2806960"
-    target_folder_id = 2751260 # ID папки для нового гайда
+    target_folder_id = 2751260
     
-    # 1. Получаем сниппет (используем версию 2.10 для этого запроса)
+    # 1. ПОЛУЧЕНИЕ СНИППЕТА
     log.info(f"📥 Запрос сниппета {snippet_id}...")
-    headers = {"Intercom-Version": SNIPPET_API_VERSION}
-    res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}", headers=headers)
     
+    # Пытаемся вызвать через версию 2.3 — она самая стабильная для сниппетов
+    snippet_headers = {
+        "Intercom-Version": "2.3",
+        "Authorization": f"Bearer {INTERCOM_TOKEN}",
+        "Accept": "application/json"
+    }
+    
+    res = requests.get(
+        f"{INTERCOM_BASE}/content_snippets/{snippet_id}", 
+        headers=snippet_headers
+    )
+    
+    # Если 2.3 не сработает, пробуем Unstable
     if res.status_code != 200:
-        log.error(f"Ошибка получения сниппета (код {res.status_code}): {res.text}")
-        return
+        log.info("Версия 2.3 не подошла, пробуем Unstable...")
+        snippet_headers["Intercom-Version"] = "Unstable"
+        res = requests.get(
+            f"{INTERCOM_BASE}/content_snippets/{snippet_id}", 
+            headers=snippet_headers
+        )
 
-    data = res.json()
-    name = data.get("name", "Migrated Guide")
-    blocks = data.get("body", {}).get("content_blocks", [])
-    
-    html_body = json_blocks_to_html(blocks)
-    if not html_body:
-        html_body = data.get("value", "<p>No content found</p>")
+    if res.status_code != 200:
+        log.error(f"❌ Ошибка доступа: {res.status_code} {res.text}")
+        return
 
     # 2. Создаем Internal Guide (используем версию 2.15 и folder_id)
     log.info(f"📤 Создание гайда в папке {target_folder_id}...")
