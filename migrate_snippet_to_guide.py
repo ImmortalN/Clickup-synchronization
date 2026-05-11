@@ -10,10 +10,10 @@ load_dotenv()
 
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = "https://api.intercom.io"
-INTERCOM_VERSION = "Unstable"  # Для работы с Internal Articles часто требуется Unstable или 2.11+
+# Попробуем версию 2.11, она стабильнее для статей
+INTERCOM_VERSION = "2.11" 
 
-INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
-INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
+INTERCOM_AUTHOR_ID = os.getenv("INTERCOM_AUTHOR_ID")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -26,79 +26,73 @@ ic.headers.update({
     "Content-Type": "application/json"
 })
 
-# ==============================
-# ФУНКЦИИ КОНВЕРТАЦИИ
-# ==============================
-
 def json_blocks_to_html(blocks):
-    """Конвертирует json_blocks Intercom в HTML строку"""
+    """Конвертирует структуру блоков Intercom в HTML"""
     html_output = ""
+    if not blocks:
+        return ""
+    
     for block in blocks:
-        block_type = block.get("type")
+        b_type = block.get("type")
         content = block.get("content", "")
-
-        if block_type == "paragraph":
+        
+        if b_type == "paragraph":
             html_output += f"<p>{content}</p>"
-        elif block_type == "heading":
+        elif b_type == "heading":
             html_output += f"<h2>{content}</h2>"
-        elif block_type == "unordered_list":
+        elif b_type in ["unordered_list", "ordered_list"]:
+            tag = "ul" if b_type == "unordered_list" else "ol"
             items = "".join([f"<li>{item}</li>" for item in block.get("items", [])])
-            html_output += f"<ul>{items}</ul>"
-        elif block_type == "ordered_list":
-            items = "".join([f"<li>{item}</li>" for item in block.get("items", [])])
-            html_output += f"ol>{items}</ol>"
-        elif block_type == "code":
+            html_output += f"<{tag}>{items}</{tag}>"
+        elif b_type == "code":
             html_output += f"<pre><code>{content}</code></pre>"
-        # Можно добавить другие типы (image, button) при необходимости
     return html_output
 
-def process_conversion(snippet_id, folder_id):
-    # 1. Получаем сниппет
-    log.info(f"📥 Получение сниппета {snippet_id}...")
+def migrate():
+    # Используем только ID сниппета
+    snippet_id = "2806960"
+    
+    log.info(f"📥 Запрос сниппета {snippet_id}...")
     res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+    
     if res.status_code != 200:
-        log.error(f"Не удалось найти сниппет: {res.text}")
+        log.error(f"Ошибка доступа (код {res.status_code}): {res.text}")
+        log.error("Проверьте, включен ли scope 'Content Snippets' в настройках вашего Intercom App.")
         return
 
-    snippet_data = res.json()
-    title = snippet_data.get("name")
-    # Сниппеты хранят контент в body.content_blocks
-    blocks = snippet_data.get("body", {}).get("content_blocks", [])
+    data = res.json()
+    name = data.get("name", "Migrated Guide")
+    # Извлекаем контент (в разных версиях API может быть в 'body' или 'value')
+    blocks = data.get("body", {}).get("content_blocks", [])
     
-    # 2. Конвертируем в HTML
     html_body = json_blocks_to_html(blocks)
     if not html_body:
-        # Если блоки пустые, пробуем взять из value (иногда в старых API)
-        html_body = snippet_data.get("value", "")
+        html_body = data.get("value", "<p>No content found</p>")
 
-    # 3. Создаем Internal Guide
-    log.info(f"📤 Создание Internal Guide: {title}...")
-    payload = {
-        "title": title,
-        "body": html_body,
-        "author_id": INTERCOM_AUTHOR_ID,
-        "parent_id": int(folder_id), # В API internal_articles используется parent_id или folder_id
-        "parent_type": "folder"
-    }
+    log.info(f"📤 Создание гайда на основе сниппета...")
     
+    payload = {
+        "title": name,
+        "body": html_body,
+        "author_id": int(INTERCOM_AUTHOR_ID) if INTERCOM_AUTHOR_ID else None,
+        "state": "published" # Сразу публикуем
+    }
+
     create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if create_res.status_code in [200, 201]:
-        new_guide = create_res.json()
-        log.info(f"✅ Гайд создан! ID: {new_guide.get('id')}")
+        guide_id = create_res.json().get("id")
+        log.info(f"✅ Гайд успешно создан (ID: {guide_id})")
         
-        # 4. Удаляем сниппет
+        # Удаляем старый сниппет
         log.info(f"🗑️ Удаление сниппета {snippet_id}...")
         del_res = ic.delete(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
-        
         if del_res.status_code == 204:
-            log.info("✨ Сниппет успешно удален.")
+            log.info("✨ Готово: гайд создан, сниппет удален.")
         else:
-            log.warning(f"⚠️ Гайд создан, но сниппет не удален: {del_res.status_code} {del_res.text}")
+            log.warning(f"Сниппет не удален (код {del_res.status_code})")
     else:
-        log.error(f"❌ Ошибка создания гайда: {create_res.status_code} {create_res.text}")
+        log.error(f"❌ Не удалось создать гайд: {create_res.text}")
 
 if __name__ == "__main__":
-    TEST_SNIPPET_ID = "2806960"
-    TARGET_FOLDER_ID = "2751260"
-    process_conversion(TEST_SNIPPET_ID, TARGET_FOLDER_ID)
+    migrate()
