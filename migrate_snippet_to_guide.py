@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import requests
 from dotenv import load_dotenv
@@ -10,17 +11,16 @@ load_dotenv()
 
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = "https://api.intercom.io"
-# Используем Unstable, так как он успешно отдал сниппет в прошлый раз
 INTERCOM_VERSION = "Unstable"
 
-# Берем ID из ваших секретов/окружения
+# Эти ID должны быть в GitHub Secrets
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# Настраиваем сессию как в вашем основном коде
+# Сессия для запросов
 ic = requests.Session()
 ic.headers.update({
     "Authorization": f"Bearer {INTERCOM_TOKEN}",
@@ -31,40 +31,38 @@ ic.headers.update({
 
 def parse_intercom_blocks(blocks):
     """
-    Преобразует блоки сниппета в HTML. 
-    Добавлена поддержка разных типов контента Intercom.
+    Превращает блоки сниппета в чистый HTML.
+    Обрабатывает типы из вашего лога: heading, paragraph, subheading, subheading3, orderedList, unorderedList.
     """
     html_output = ""
-    if not blocks:
-        return ""
-    
     for block in blocks:
         b_type = block.get("type")
-        content = block.get("text") or block.get("content") or ""
+        text = block.get("text", "")
+        items = block.get("items", [])
         
-        if b_type == "paragraph":
-            html_output += f"<p>{content}</p>"
-        elif b_type == "heading":
-            html_output += f"<h2>{content}</h2>"
-        elif b_type == "code":
-            html_output += f"<pre><code>{content}</code></pre>"
-        elif b_type in ["unordered_list", "ordered_list"]:
-            tag = "ul" if b_type == "unordered_list" else "ol"
-            items = "".join([f"<li>{item}</li>" for item in block.get("items", [])])
-            html_output += f"<{tag}>{items}</{tag}>"
-        elif b_type == "image":
-            url = block.get("url")
-            html_output += f'<img src="{url}" style="max-width:100%;">'
+        if b_type == "heading":
+            html_output += f"<h1>{text}</h1>"
+        elif b_type == "subheading":
+            html_output += f"<h2>{text}</h2>"
+        elif b_type == "subheading3":
+            html_output += f"<h3>{text}</h3>"
+        elif b_type == "paragraph":
+            html_output += f"<p>{text}</p>"
+        elif b_type == "orderedList":
+            li_items = "".join([f"<li>{item}</li>" for item in items])
+            html_output += f"<ol>{li_items}</ol>"
+        elif b_type == "unorderedList":
+            li_items = "".join([f"<li>{item}</li>" for item in items])
+            html_output += f"<ul>{li_items}</ul>"
             
     return html_output
 
 def migrate():
-    # НОВЫЙ ID СНИППЕТА
+    # Используем новый ID сниппета из логов
     snippet_id = "4166254"
     target_folder_id = 2751260
     
     log.info(f"📥 Запрос сниппета {snippet_id}...")
-    
     res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
     
     if res.status_code != 200:
@@ -73,30 +71,32 @@ def migrate():
 
     snippet_data = res.json()
     
-    # Пытаемся получить название из разных полей
-    name = snippet_data.get("name") or snippet_data.get("title") or "Untitled Snippet"
+    # В логе заголовок лежит в 'title', а контент в 'json_blocks' (как строка)
+    title = snippet_data.get("title") or "Migrated Snippet"
+    json_blocks_raw = snippet_data.get("json_blocks")
     
-    # В Unstable сниппеты часто лежат в body -> content_blocks
-    body_data = snippet_data.get("body", {})
-    blocks = body_data.get("content_blocks", [])
-    
-    html_content = parse_intercom_blocks(blocks)
-    
-    # Если блоки пустые, пробуем взять сырое значение 'value' (как в старых сниппетах)
-    if not html_content:
-        html_content = snippet_data.get("value") or ""
-    
-    if not html_content or html_content == "":
-        log.error("❌ Контент сниппета пуст. Проверьте структуру JSON в логах GitHub.")
-        # Выводим структуру для отладки
-        log.info(f"DEBUG JSON: {snippet_data}")
+    if not json_blocks_raw:
+        log.error("❌ Поле json_blocks отсутствует в ответе API.")
         return
 
-    log.info(f"📤 Создание Internal Guide: '{name}' в папке {target_folder_id}")
+    try:
+        # Десериализуем строку в список объектов
+        blocks = json.loads(json_blocks_raw)
+    except Exception as e:
+        log.error(f"❌ Ошибка десериализации json_blocks: {e}")
+        return
+
+    # Конвертируем блоки в HTML
+    html_content = parse_intercom_blocks(blocks)
     
-    # Формируем payload в стиле вашего sync_bot.py
+    if not html_content:
+        log.error("❌ После парсинга блоков контент оказался пустым.")
+        return
+
+    log.info(f"📤 Создание Internal Guide: '{title}' в папку {target_folder_id}")
+    
     payload = {
-        "title": name,
+        "title": title,
         "body": html_content,
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
@@ -108,9 +108,8 @@ def migrate():
     create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if create_res.status_code in [200, 201]:
-        new_guide = create_res.json()
-        log.info(f"✅ Гайд успешно создан! ID: {new_guide.get('id')}")
-        log.info("ℹ️ Удаление сниппета пропущено (режим теста).")
+        log.info(f"✅ Гайд успешно создан! ID: {create_res.json().get('id')}")
+        log.info("ℹ️ Удаление сниппета пропущено по вашей просьбе.")
     else:
         log.error(f"❌ Ошибка создания гайда: {create_res.status_code} {create_res.text}")
 
