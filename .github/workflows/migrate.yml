@@ -1,15 +1,28 @@
-test_conversion:
+name: Migrate Snippet to Guide
+
+on:
+  workflow_dispatch: # Позволяет запускать скрипт вручную кнопкой в GitHub
+
+jobs:
+  run_migration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
-        run: pip install requests python-dotenv
-      - name: Run test conversion
+        run: |
+          pip install requests python-dotenv
+
+      - name: Run migration script
         env:
           INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
           INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
-        run: python convert_snippet.py
+          # Добавьте OWNER_ID если он используется в коде
+          INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
+        run: python migrate_snippet_to_guide.py
