@@ -100,7 +100,9 @@ def migrate():
         "body": html_content,
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
-        "parent_id": target_folder_id,
+        # Попробуем передать оба ключа, чтобы наверняка попасть в папку
+        "folder_id": int(target_folder_id), 
+        "parent_id": int(target_folder_id),
         "parent_type": "folder",
         "state": "published"
     }
