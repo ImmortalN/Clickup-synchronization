@@ -10,101 +10,109 @@ load_dotenv()
 
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = "https://api.intercom.io"
-INTERCOM_AUTHOR_ID = os.getenv("INTERCOM_AUTHOR_ID")
-# Добавляем получение OWNER_ID
-INTERCOM_OWNER_ID = os.getenv("INTERCOM_OWNER_ID")
+# Используем Unstable, так как он успешно отдал сниппет в прошлый раз
+INTERCOM_VERSION = "Unstable"
+
+# Берем ID из ваших секретов/окружения
+INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
+INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-def json_blocks_to_html(blocks):
+# Настраиваем сессию как в вашем основном коде
+ic = requests.Session()
+ic.headers.update({
+    "Authorization": f"Bearer {INTERCOM_TOKEN}",
+    "Accept": "application/json",
+    "Intercom-Version": INTERCOM_VERSION,
+    "Content-Type": "application/json"
+})
+
+def parse_intercom_blocks(blocks):
+    """
+    Преобразует блоки сниппета в HTML. 
+    Добавлена поддержка разных типов контента Intercom.
+    """
     html_output = ""
-    if not blocks: return ""
+    if not blocks:
+        return ""
+    
     for block in blocks:
         b_type = block.get("type")
-        content = block.get("content", "")
+        content = block.get("text") or block.get("content") or ""
+        
         if b_type == "paragraph":
             html_output += f"<p>{content}</p>"
         elif b_type == "heading":
             html_output += f"<h2>{content}</h2>"
+        elif b_type == "code":
+            html_output += f"<pre><code>{content}</code></pre>"
         elif b_type in ["unordered_list", "ordered_list"]:
             tag = "ul" if b_type == "unordered_list" else "ol"
             items = "".join([f"<li>{item}</li>" for item in block.get("items", [])])
             html_output += f"<{tag}>{items}</{tag}>"
-        elif b_type == "code":
-            html_output += f"<pre><code>{content}</code></pre>"
+        elif b_type == "image":
+            url = block.get("url")
+            html_output += f'<img src="{url}" style="max-width:100%;">'
+            
     return html_output
 
 def migrate():
-    snippet_id = "2806960"
+    # НОВЫЙ ID СНИППЕТА
+    snippet_id = "4166254"
     target_folder_id = 2751260
     
-    # 1. ПОЛУЧЕНИЕ СНИППЕТА (Unstable сработал в прошлый раз)
     log.info(f"📥 Запрос сниппета {snippet_id}...")
     
-    success_res = None
-    versions_to_try = ["Unstable", "2.3", "2.11"]
-    used_version = "Unstable"
+    res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
     
-    for v in versions_to_try:
-        headers = {
-            "Intercom-Version": v,
-            "Authorization": f"Bearer {INTERCOM_TOKEN}",
-            "Accept": "application/json"
-        }
-        res = requests.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}", headers=headers, timeout=10)
-        if res.status_code == 200:
-            log.info(f"✅ Успешно получен сниппет через версию API {v}")
-            success_res = res.json()
-            used_version = v
-            break
-
-    if not success_res:
-        log.error("❌ Не удалось получить сниппет.")
+    if res.status_code != 200:
+        log.error(f"❌ Ошибка получения сниппета: {res.status_code} {res.text}")
         return
 
-    name = success_res.get("name", "Migrated Guide")
-    blocks = success_res.get("body", {}).get("content_blocks", [])
-    html_body = json_blocks_to_html(blocks)
-    if not html_body:
-        html_body = success_res.get("value") or success_res.get("content") or "<p>No content</p>"
-
-    # 2. СОЗДАНИЕ ГАЙДА (Добавляем owner_id)
-    log.info(f"📤 Создание гайда в папке {target_folder_id}...")
+    snippet_data = res.json()
     
-    guide_payload = {
+    # Пытаемся получить название из разных полей
+    name = snippet_data.get("name") or snippet_data.get("title") or "Untitled Snippet"
+    
+    # В Unstable сниппеты часто лежат в body -> content_blocks
+    body_data = snippet_data.get("body", {})
+    blocks = body_data.get("content_blocks", [])
+    
+    html_content = parse_intercom_blocks(blocks)
+    
+    # Если блоки пустые, пробуем взять сырое значение 'value' (как в старых сниппетах)
+    if not html_content:
+        html_content = snippet_data.get("value") or ""
+    
+    if not html_content or html_content == "":
+        log.error("❌ Контент сниппета пуст. Проверьте структуру JSON в логах GitHub.")
+        # Выводим структуру для отладки
+        log.info(f"DEBUG JSON: {snippet_data}")
+        return
+
+    log.info(f"📤 Создание Internal Guide: '{name}' в папке {target_folder_id}")
+    
+    # Формируем payload в стиле вашего sync_bot.py
+    payload = {
         "title": name,
-        "body": html_body,
-        "author_id": int(INTERCOM_AUTHOR_ID) if INTERCOM_AUTHOR_ID else None,
-        "owner_id": int(INTERCOM_OWNER_ID) if INTERCOM_OWNER_ID else None, # ВОТ ЭТО ПОЛЕ
+        "body": html_content,
+        "owner_id": INTERCOM_OWNER_ID,
+        "author_id": INTERCOM_AUTHOR_ID,
         "parent_id": target_folder_id,
         "parent_type": "folder",
         "state": "published"
     }
 
-    guide_headers = {
-        "Intercom-Version": "2.15",
-        "Authorization": f"Bearer {INTERCOM_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-    create_res = requests.post(f"{INTERCOM_BASE}/internal_articles", json=guide_payload, headers=guide_headers)
+    create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if create_res.status_code in [200, 201]:
-        guide_id = create_res.json().get("id")
-        log.info(f"✅ Гайд успешно создан (ID: {guide_id})")
-        
-        # 3. УДАЛЕНИЕ СНИППЕТА
-        log.info(f"🗑️ Удаление сниппета {snippet_id}...")
-        del_headers = {"Intercom-Version": used_version, "Authorization": f"Bearer {INTERCOM_TOKEN}"}
-        del_res = requests.delete(f"{INTERCOM_BASE}/content_snippets/{snippet_id}", headers=del_headers)
-        
-        if del_res.status_code == 204:
-            log.info("✨ Готово: гайд создан, сниппет удален.")
-        else:
-            log.warning(f"Сниппет не удален (код {del_res.status_code}): {del_res.text}")
+        new_guide = create_res.json()
+        log.info(f"✅ Гайд успешно создан! ID: {new_guide.get('id')}")
+        log.info("ℹ️ Удаление сниппета пропущено (режим теста).")
     else:
-        log.error(f"❌ Не удалось создать гайд: {create_res.text}")
+        log.error(f"❌ Ошибка создания гайда: {create_res.status_code} {create_res.text}")
 
 if __name__ == "__main__":
     migrate()
