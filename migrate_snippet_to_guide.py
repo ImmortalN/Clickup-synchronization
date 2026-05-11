@@ -10,8 +10,10 @@ load_dotenv()
 
 INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = "https://api.intercom.io"
-# Попробуем версию 2.11, она стабильнее для статей
-INTERCOM_VERSION = "2.11" 
+
+# Для сниппетов часто нужна более старая версия, попробуем переключать ее на лету
+SNIPPET_API_VERSION = "2.10" 
+GUIDE_API_VERSION = "2.15"
 
 INTERCOM_AUTHOR_ID = os.getenv("INTERCOM_AUTHOR_ID")
 
@@ -22,7 +24,6 @@ ic = requests.Session()
 ic.headers.update({
     "Authorization": f"Bearer {INTERCOM_TOKEN}",
     "Accept": "application/json",
-    "Intercom-Version": INTERCOM_VERSION,
     "Content-Type": "application/json"
 })
 
@@ -49,48 +50,54 @@ def json_blocks_to_html(blocks):
     return html_output
 
 def migrate():
-    # Используем только ID сниппета
     snippet_id = "2806960"
+    target_folder_id = 2751260 # ID папки для нового гайда
     
+    # 1. Получаем сниппет (используем версию 2.10 для этого запроса)
     log.info(f"📥 Запрос сниппета {snippet_id}...")
-    res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+    headers = {"Intercom-Version": SNIPPET_API_VERSION}
+    res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}", headers=headers)
     
     if res.status_code != 200:
-        log.error(f"Ошибка доступа (код {res.status_code}): {res.text}")
-        log.error("Проверьте, включен ли scope 'Content Snippets' в настройках вашего Intercom App.")
+        log.error(f"Ошибка получения сниппета (код {res.status_code}): {res.text}")
         return
 
     data = res.json()
     name = data.get("name", "Migrated Guide")
-    # Извлекаем контент (в разных версиях API может быть в 'body' или 'value')
     blocks = data.get("body", {}).get("content_blocks", [])
     
     html_body = json_blocks_to_html(blocks)
     if not html_body:
         html_body = data.get("value", "<p>No content found</p>")
 
-    log.info(f"📤 Создание гайда на основе сниппета...")
+    # 2. Создаем Internal Guide (используем версию 2.15 и folder_id)
+    log.info(f"📤 Создание гайда в папке {target_folder_id}...")
     
     payload = {
         "title": name,
         "body": html_body,
         "author_id": int(INTERCOM_AUTHOR_ID) if INTERCOM_AUTHOR_ID else None,
-        "state": "published" # Сразу публикуем
+        "parent_id": target_folder_id,
+        "parent_type": "folder",
+        "state": "published"
     }
 
-    create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+    headers = {"Intercom-Version": GUIDE_API_VERSION}
+    create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, headers=headers)
     
     if create_res.status_code in [200, 201]:
         guide_id = create_res.json().get("id")
         log.info(f"✅ Гайд успешно создан (ID: {guide_id})")
         
-        # Удаляем старый сниппет
+        # 3. Удаляем сниппет
         log.info(f"🗑️ Удаление сниппета {snippet_id}...")
-        del_res = ic.delete(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+        headers = {"Intercom-Version": SNIPPET_API_VERSION}
+        del_res = ic.delete(f"{INTERCOM_BASE}/content_snippets/{snippet_id}", headers=headers)
+        
         if del_res.status_code == 204:
-            log.info("✨ Готово: гайд создан, сниппет удален.")
+            log.info("✨ Готово: гайд создан в папке, сниппет удален.")
         else:
-            log.warning(f"Сниппет не удален (код {del_res.status_code})")
+            log.warning(f"Сниппет не удален (код {del_res.status_code}): {del_res.text}")
     else:
         log.error(f"❌ Не удалось создать гайд: {create_res.text}")
 
