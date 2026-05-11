@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import requests
+import time
 from dotenv import load_dotenv
 
 # ==============================
@@ -13,14 +14,14 @@ INTERCOM_TOKEN = os.getenv("INTERCOM_ACCESS_TOKEN")
 INTERCOM_BASE = "https://api.intercom.io"
 INTERCOM_VERSION = "Unstable"
 
-# Эти ID должны быть в GitHub Secrets
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
+
+TARGET_FOLDER_ID = 2751260
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# Сессия для запросов
 ic = requests.Session()
 ic.headers.update({
     "Authorization": f"Bearer {INTERCOM_TOKEN}",
@@ -29,11 +30,11 @@ ic.headers.update({
     "Content-Type": "application/json"
 })
 
+# ==============================
+# ПАРСЕР ХТМЛ
+# ==============================
+
 def parse_intercom_blocks(blocks):
-    """
-    Превращает блоки сниппета в чистый HTML.
-    Обрабатывает типы из вашего лога: heading, paragraph, subheading, subheading3, orderedList, unorderedList.
-    """
     html_output = ""
     for block in blocks:
         b_type = block.get("type")
@@ -57,63 +58,84 @@ def parse_intercom_blocks(blocks):
             
     return html_output
 
-def migrate():
-    # Используем новый ID сниппета из логов
-    snippet_id = "4166254"
-    target_folder_id = 2751260
-    
-    log.info(f"📥 Запрос сниппета {snippet_id}...")
-    res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
-    
-    if res.status_code != 200:
-        log.error(f"❌ Ошибка получения сниппета: {res.status_code} {res.text}")
-        return
+# ==============================
+# ОСНОВНАЯ ЛОГИКА
+# ==============================
 
-    snippet_data = res.json()
+def fetch_all_snippets():
+    """Получает список всех сниппетов в аккаунте"""
+    log.info("🔍 Получение списка всех сниппетов...")
+    all_snippets = []
+    url = f"{INTERCOM_BASE}/content_snippets"
     
-    # В логе заголовок лежит в 'title', а контент в 'json_blocks' (как строка)
-    title = snippet_data.get("title") or "Migrated Snippet"
-    json_blocks_raw = snippet_data.get("json_blocks")
-    
-    if not json_blocks_raw:
-        log.error("❌ Поле json_blocks отсутствует в ответе API.")
-        return
+    while url:
+        res = ic.get(url)
+        if res.status_code != 200:
+            log.error(f"Не удалось получить список сниппетов: {res.text}")
+            break
+        
+        data = res.json()
+        all_snippets.extend(data.get("data", []))
+        
+        # Обработка пагинации
+        pages = data.get("pages", {})
+        url = pages.get("next")
+        
+    log.info(f"Найдено сниппетов: {len(all_snippets)}")
+    return all_snippets
 
-    try:
-        # Десериализуем строку в список объектов
-        blocks = json.loads(json_blocks_raw)
-    except Exception as e:
-        log.error(f"❌ Ошибка десериализации json_blocks: {e}")
-        return
-
-    # Конвертируем блоки в HTML
-    html_content = parse_intercom_blocks(blocks)
+def migrate_all():
+    snippets = fetch_all_snippets()
     
-    if not html_content:
-        log.error("❌ После парсинга блоков контент оказался пустым.")
-        return
-
-    log.info(f"📤 Создание Internal Guide: '{title}' в папку {target_folder_id}")
-    
-    payload = {
-        "title": title,
-        "body": html_content,
-        "owner_id": INTERCOM_OWNER_ID,
-        "author_id": INTERCOM_AUTHOR_ID,
-        # Попробуем передать оба ключа, чтобы наверняка попасть в папку
-        "folder_id": int(target_folder_id), 
-        "parent_id": int(target_folder_id),
-        "parent_type": "folder",
-        "state": "published"
-    }
-
-    create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
-    
-    if create_res.status_code in [200, 201]:
-        log.info(f"✅ Гайд успешно создан! ID: {create_res.json().get('id')}")
-        log.info("ℹ️ Удаление сниппета пропущено по вашей просьбе.")
-    else:
-        log.error(f"❌ Ошибка создания гайда: {create_res.status_code} {create_res.text}")
+    for snip_summary in snippets:
+        snippet_id = snip_summary["id"]
+        
+        # 1. Получаем полные данные каждого сниппета
+        log.info(f"--- Обработка сниппета ID: {snippet_id} ---")
+        res = ic.get(f"{INTERCOM_BASE}/content_snippets/{snippet_id}")
+        
+        if res.status_code != 200:
+            log.error(f"❌ Не удалось получить данные сниппета {snippet_id}: {res.text}")
+            continue
+            
+        snippet_data = res.json()
+        title = snippet_data.get("title") or snippet_data.get("name") or f"Snippet {snippet_id}"
+        json_blocks_raw = snippet_data.get("json_blocks")
+        
+        if not json_blocks_raw:
+            log.warning(f"⚠️ У сниппета '{title}' нет json_blocks. Пропускаем.")
+            continue
+            
+        try:
+            blocks = json.loads(json_blocks_raw)
+        except:
+            log.error(f"❌ Ошибка парсинга JSON для сниппета '{title}'")
+            continue
+            
+        html_content = parse_intercom_blocks(blocks)
+        
+        # 2. Создаем гайд
+        log.info(f"📤 Создание гайда: '{title}'...")
+        payload = {
+            "title": title,
+            "body": html_content,
+            "owner_id": INTERCOM_OWNER_ID,
+            "author_id": INTERCOM_AUTHOR_ID,
+            "folder_id": int(TARGET_FOLDER_ID),
+            "parent_id": int(TARGET_FOLDER_ID),
+            "parent_type": "folder",
+            "state": "published"
+        }
+        
+        create_res = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+        
+        if create_res.status_code in [200, 201]:
+            log.info(f"✅ Успешно! ID нового гайда: {create_res.json().get('id')}")
+        else:
+            log.error(f"❌ Ошибка при создании гайда '{title}': {create_res.text}")
+            
+        # Небольшая пауза, чтобы не упереться в лимиты API Intercom
+        time.sleep(0.3)
 
 if __name__ == "__main__":
-    migrate()
+    migrate_all()
