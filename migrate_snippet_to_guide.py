@@ -49,7 +49,7 @@ def json_blocks_to_html(blocks):
             html_output += f"<pre><code>{content}</code></pre>"
     return html_output
 
-ddef migrate():
+def migrate():
     snippet_id = "2806960"
     target_folder_id = 2751260
     
