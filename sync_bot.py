@@ -145,20 +145,18 @@ def sync_single_article(art, is_force=True):
     return False
 
 def create_or_update_by_clickup_id(task_id, target_folder_id=None):
-    """Создает новую статью или обновляет существующую, используя ID задачи ClickUp"""
+    """Создает новую статью или обновляет существующую с проверкой ответа API"""
     task_data = get_clickup_task(task_id)
     if not task_data or task_data == "DELETED":
-        log.error(f"❌ Ошибка: Задача ClickUp {task_id} не найдена или удалена.")
+        log.error(f"❌ Ошибка: Задача ClickUp {task_id} не найдена.")
         return
 
     name = task_data.get("name")
     desc = task_data.get("markdown_description") or task_data.get("description") or ""
-    
     new_title = f"{name} [{task_id}]"[:255]
     body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
     new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
-
-    folder_id = int(target_folder_id) if target_folder_id else DEFAULT_FOLDER_ID
+    folder_id = int(target_folder_id) if target_folder_id and str(target_folder_id).isdigit() else DEFAULT_FOLDER_ID
 
     payload = {
         "title": new_title,
@@ -169,12 +167,21 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None):
     }
 
     existing_art = find_article_by_task_id(task_id)
+    
     if existing_art:
-        log.info(f"🔄 Статья найдена. Обновляем: {new_title}")
-        ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload)
+        log.info(f"🔄 Обновление статьи {existing_art['id']}: {new_title}")
+        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload)
+        if r.status_code in [200, 201]:
+            log.info("✅ Успешно обновлено")
+        else:
+            log.error(f"❌ Ошибка API ({r.status_code}): {r.text}")
     else:
-        log.info(f"✨ Статья не найдена. Создаем новую: {new_title}")
-        ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+        log.info(f"✨ Создание новой статьи: {new_title}")
+        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+        if r.status_code in [200, 201]:
+            log.info(f"✅ Успешно создано. ID: {r.json().get('id')}")
+        else:
+            log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text}")
 
 # ==============================
 # ГЛАВНЫЙ ПРОЦЕСС
