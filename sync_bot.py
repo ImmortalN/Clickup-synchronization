@@ -85,8 +85,26 @@ def get_clickup_task(task_id):
     except: pass
     return None
 
+def find_article_by_task_id(task_id):
+    """Ищет существующую статью в Intercom по ID задачи ClickUp в заголовке"""
+    page = 1
+    while True:
+        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
+        if r.status_code != 200: break
+        data = r.json()
+        articles = data.get("data", [])
+        if not articles: break
+        
+        for art in articles:
+            if f"[{task_id}]" in art.get("title", ""):
+                return art
+        
+        if page >= data.get("pages", {}).get("total_pages", 1): break
+        page += 1
+        time.sleep(0.3)
+    return None
+
 def sync_single_article(art, is_force=True):
-    """Логика обновления одной конкретной статьи"""
     article_id = art["id"]
     title = art.get("title", "")
     current_folder = art.get("parent_id") or art.get("folder_id")
@@ -126,24 +144,58 @@ def sync_single_article(art, is_force=True):
         return True
     return False
 
+def create_or_update_by_clickup_id(task_id, target_folder_id=None):
+    """Создает новую статью или обновляет существующую, используя ID задачи ClickUp"""
+    task_data = get_clickup_task(task_id)
+    if not task_data or task_data == "DELETED":
+        log.error(f"❌ Ошибка: Задача ClickUp {task_id} не найдена или удалена.")
+        return
+
+    name = task_data.get("name")
+    desc = task_data.get("markdown_description") or task_data.get("description") or ""
+    
+    new_title = f"{name} [{task_id}]"[:255]
+    body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
+    new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
+
+    folder_id = int(target_folder_id) if target_folder_id else DEFAULT_FOLDER_ID
+
+    payload = {
+        "title": new_title,
+        "body": new_body[:50000],
+        "owner_id": INTERCOM_OWNER_ID,
+        "author_id": INTERCOM_AUTHOR_ID,
+        "folder_id": folder_id
+    }
+
+    existing_art = find_article_by_task_id(task_id)
+    if existing_art:
+        log.info(f"🔄 Статья найдена. Обновляем: {new_title}")
+        ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload)
+    else:
+        log.info(f"✨ Статья не найдена. Создаем новую: {new_title}")
+        ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
+
 # ==============================
 # ГЛАВНЫЙ ПРОЦЕСС
 # ==============================
 
 def main():
-    if len(sys.argv) == 1: 
-        week_number = datetime.now().isocalendar()[1]
-        if week_number % 2 != 0:
-            log.info("Сегодня нечетная неделя. Пропускаем автоматическую синхронизацию (раз в 2 недели).")
-            return
-    # Читаем аргументы: 1 - ID папки, 2 - Список ID статей
+    # Аргументы: 1-FolderID, 2-IntercomArtIDs, 3-ClickUpTaskID
     target_folder = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else None
     specific_ids = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
+    clickup_task_id = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
 
-    # ВАРИАНТ 4: Точечное обновление по ID статей
+    # Сценарий 1: Прямое создание/обновление по ID задачи ClickUp
+    if clickup_task_id:
+        log.info(f"--- РЕЖИМ ОДНОЙ ЗАДАЧИ CLICKUP: {clickup_task_id} ---")
+        create_or_update_by_clickup_id(clickup_task_id, target_folder)
+        return
+
+    # Сценарий 2: Точечное обновление по ID статей Intercom
     if specific_ids:
         ids = [i.strip() for i in specific_ids.split(",")]
-        log.info(f"--- РЕЖИМ ТОЧЕЧНОГО ОБНОВЛЕНИЯ: {len(ids)} шт. ---")
+        log.info(f"--- РЕЖИМ ТОЧЕЧНОГО ОБНОВЛЕНИЯ INTERCOM: {len(ids)} шт. ---")
         for aid in ids:
             res = ic.get(f"{INTERCOM_BASE}/internal_articles/{aid}")
             if res.status_code == 200:
@@ -152,11 +204,17 @@ def main():
                 log.error(f"Статья {aid} не найдена в Intercom.")
         return
 
-    # ВАРИАНТЫ 1, 2, 3: Работа по папке
+    # Сценарий 3: Массовая синхронизация по папке
+    if not target_folder:
+        week_number = datetime.now().isocalendar()[1]
+        if week_number % 2 != 0:
+            log.info("Сегодня нечетная неделя. Пропускаем автоматику.")
+            return
+
     folder_to_scan = target_folder or str(DEFAULT_FOLDER_ID)
-    is_force = target_folder is not None # Если указали папку вручную, обновляем всё принудительно
+    is_force = target_folder is not None 
     
-    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ (Folder: {folder_to_scan}, Force: {is_force}) ---")
+    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) ---")
 
     page = 1
     while True:
