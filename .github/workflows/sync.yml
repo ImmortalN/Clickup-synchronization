@@ -3,7 +3,6 @@ name: ClickUp Intercom Sync Bot
 on:
   workflow_dispatch:
     inputs:
-
       script:
         description: 'Какой скрипт запускать'
         required: true
@@ -13,6 +12,11 @@ on:
           - sync
           - delete_guides
           - migrate_snippet
+
+      clickup_task_id:
+        description: 'ID задачи ClickUp (создаст или обновит конкретный гайд)'
+        required: false
+        default: ''
 
       folder_id:
         description: 'ID папки (для sync_bot.py)'
@@ -54,7 +58,8 @@ jobs:
           INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
           INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
         run: |
-          python sync_bot.py "${{ github.event.inputs.folder_id }}" "${{ github.event.inputs.article_ids }}" 2>&1 | tee sync.log
+          # Теперь передаем 3 аргумента: folder_id, article_ids и clickup_task_id
+          python sync_bot.py "${{ github.event.inputs.folder_id }}" "${{ github.event.inputs.article_ids }}" "${{ github.event.inputs.clickup_task_id }}" 2>&1 | tee sync.log
 
       # ==============================
       # DELETE INTERNAL GUIDES
@@ -94,7 +99,8 @@ jobs:
           from: GitHub Actions Sync
           body: |
             Выполнение завершено.
+            Сценарий: ${{ github.event.inputs.script || 'Scheduled Sync' }}
             Статус: ${{ job.status }}
 
-            Логи прикреплены.
+            Логи во вложении.
           attachments: sync.log
