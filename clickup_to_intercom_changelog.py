@@ -132,15 +132,12 @@ def create_release_guide(main_task, existing_articles):
     task_id = main_task.get("id")
     subtasks = main_task.get("subtasks", [])
     
-    # Получаем дату создания таска из ClickUp (она приходит в миллисекундах)
+    # Получаем дату создания таска из ClickUp
     date_created_ms = main_task.get("date_created")
     date_str = ""
     if date_created_ms:
-        # Переводим миллисекунды в секунды и форматируем в ДД.ММ.ГГГГ
         date_str = datetime.fromtimestamp(int(date_created_ms) / 1000).strftime('%d.%m.%Y')
 
-    # Формируем красивый заголовок с датой релиза
-    # Получится: "Имя Таска (09.06.2026) release [task_id]"
     if date_str:
         new_title = f"{name} ({date_str}) release [{task_id}]"[:255]
         h1_title = f"{html.escape(name)} ({date_str}) release"
@@ -154,20 +151,25 @@ def create_release_guide(main_task, existing_articles):
         for sub in subtasks:
             sub_name = html.escape(sub.get("name", "").strip())
             if sub_name:
-                lines.append(f"  <li>{sub_name}</li>")  # Для сабтасков дату не добавляем, как вы и просили
+                lines.append(f"  <li>{sub_name}</li>")
         lines.append("</ul>")
     
     body = "\n".join(lines)
     
+    # ==========================================
+    # ОБНОВЛЕННЫЙ PAYLOAD С ВКЛЮЧЕНИЕМ AI ДЛЯ FIN
+    # ==========================================
     payload = {
         "title": new_title,
         "body": body[:50000],
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
-        "folder_id": DEFAULT_FOLDER_ID
+        "folder_id": DEFAULT_FOLDER_ID,
+        "ai_agent_availability": True,   # Включает видимость для Fin AI Agent
+        "ai_copilot_availability": True   # Включает видимость для Copilot (подсказки агентам)
     }
     
-    log.info(f"✨ Создаём: {new_title}")
+    log.info(f"✨ Создаём: {new_title} (с доступом для Fin/Copilot)")
     r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if r.status_code in (200, 201):
