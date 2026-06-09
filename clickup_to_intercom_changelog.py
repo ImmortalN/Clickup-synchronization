@@ -31,8 +31,10 @@ ic.headers.update({
     "Content-Type": "application/json"
 })
 
-def get_tasks_from_source(source_id):
-    """Поддержка List ID и View ID"""
+def get_all_tasks_from_source(source_id):
+    """Получаем ВСЕ задачи с пагинацией (List или View)"""
+    all_tasks = []
+    page = 0
     params = {
         "subtasks": "false",
         "include_closed": "true",
@@ -40,25 +42,34 @@ def get_tasks_from_source(source_id):
         "reverse": "true"
     }
     
-    # Пробуем List
-    r = cu.get(f"https://api.clickup.com/api/v2/list/{source_id}/task", params=params)
-    if r.status_code == 200:
-        tasks = r.json().get("tasks", [])
-        log.info(f"✅ Получено {len(tasks)} задач из List")
-        return tasks
+    while True:
+        params["page"] = page
+        
+        # Пробуем List
+        r = cu.get(f"https://api.clickup.com/api/v2/list/{source_id}/task", params=params)
+        if r.status_code != 200:
+            # Пробуем View
+            r = cu.get(f"https://api.clickup.com/api/v2/view/{source_id}/task", params=params)
+        
+        if r.status_code == 200:
+            data = r.json()
+            tasks = data.get("tasks", [])
+            all_tasks.extend(tasks)
+            log.info(f"Получено {len(tasks)} задач (страница {page})")
+            
+            if len(tasks) < 100:  # последняя страница
+                break
+            page += 1
+            time.sleep(0.5)
+        else:
+            log.error(f"Ошибка ClickUp: {r.status_code} {r.text}")
+            break
     
-    # Пробуем View
-    r = cu.get(f"https://api.clickup.com/api/v2/view/{source_id}/task", params=params)
-    if r.status_code == 200:
-        tasks = r.json().get("tasks", [])
-        log.info(f"✅ Получено {len(tasks)} задач из View")
-        return tasks
-    
-    log.error(f"❌ Не удалось получить задачи по ID: {source_id}")
-    log.error(r.text)
-    return []
+    log.info(f"✅ Всего загружено {len(all_tasks)} задач")
+    return all_tasks
 
 def get_clickup_task(task_id):
+    """Получаем полную задачу с сабтасками"""
     r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", 
                params={"subtasks": "true", "include_subtasks": "true"})
     if r.status_code == 200:
@@ -70,9 +81,8 @@ def get_clickup_task(task_id):
 def find_article_by_title(title_prefix):
     page = 1
     while True:
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", 
-                  params={"page": page, "per_page": 50})
-        if r.status_code != 200:
+        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
+        if r.status_code != 200: 
             break
         articles = r.json().get("data", [])
         for art in articles:
@@ -129,19 +139,18 @@ def create_or_update_release_guide(main_task):
         log.error(f"❌ Intercom ошибка {r.status_code}: {r.text}")
 
 def main():
-    # Аргументы: python script.py [FOLDER_ID] [CLICKUP_SOURCE_ID]
     folder_id = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_FOLDER_ID)
-    source_id = sys.argv[2] if len(sys.argv) > 2 else "8cjzjmb-30872"  # View ID по умолчанию
+    source_id = sys.argv[2] if len(sys.argv) > 2 else "8cjzjmb-30872"
     
-    current_folder = int(folder_id) if folder_id.isdigit() else DEFAULT_FOLDER_ID
+    current_folder = int(folder_id) if str(folder_id).isdigit() else DEFAULT_FOLDER_ID
     
     log.info(f"Запуск синхронизации в папку Intercom: {current_folder}")
     log.info(f"Источник ClickUp: {source_id}")
     
-    tasks = get_tasks_from_source(source_id)
+    tasks = get_all_tasks_from_source(source_id)
     
     if not tasks:
-        log.error("Не найдено задач. Проверь ID источника.")
+        log.error("Не найдено задач.")
         return
     
     for task in tasks:
