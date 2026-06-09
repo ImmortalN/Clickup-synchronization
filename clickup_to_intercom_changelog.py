@@ -32,7 +32,7 @@ ic.headers.update({
 })
 
 def get_tasks_from_source(source_id):
-    """Поддержка и List ID, и View ID"""
+    """Поддержка List ID и View ID"""
     params = {
         "subtasks": "false",
         "include_closed": "true",
@@ -40,22 +40,22 @@ def get_tasks_from_source(source_id):
         "reverse": "true"
     }
     
-    # Пробуем как List
+    # Пробуем List
     r = cu.get(f"https://api.clickup.com/api/v2/list/{source_id}/task", params=params)
     if r.status_code == 200:
         tasks = r.json().get("tasks", [])
         log.info(f"✅ Получено {len(tasks)} задач из List")
         return tasks
     
-    # Пробуем как View
+    # Пробуем View
     r = cu.get(f"https://api.clickup.com/api/v2/view/{source_id}/task", params=params)
     if r.status_code == 200:
         tasks = r.json().get("tasks", [])
         log.info(f"✅ Получено {len(tasks)} задач из View")
         return tasks
     
-    log.error(f"❌ Не удалось получить задачи. Source ID: {source_id}")
-    log.error(f"ClickUp ответил: {r.text}")
+    log.error(f"❌ Не удалось получить задачи по ID: {source_id}")
+    log.error(r.text)
     return []
 
 def get_clickup_task(task_id):
@@ -129,20 +129,19 @@ def create_or_update_release_guide(main_task):
         log.error(f"❌ Intercom ошибка {r.status_code}: {r.text}")
 
 def main():
-    target_folder = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_FOLDER_ID)
-    source_id = sys.argv[2] if len(sys.argv) > 2 else "901212763746"   # List ID по умолчанию
+    # Аргументы: python script.py [FOLDER_ID] [CLICKUP_SOURCE_ID]
+    folder_id = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_FOLDER_ID)
+    source_id = sys.argv[2] if len(sys.argv) > 2 else "8cjzjmb-30872"  # View ID по умолчанию
     
-    if target_folder.isdigit():
-        global DEFAULT_FOLDER_ID
-        DEFAULT_FOLDER_ID = int(target_folder)
+    current_folder = int(folder_id) if folder_id.isdigit() else DEFAULT_FOLDER_ID
     
-    log.info(f"Запуск синхронизации в папку Intercom: {DEFAULT_FOLDER_ID}")
+    log.info(f"Запуск синхронизации в папку Intercom: {current_folder}")
     log.info(f"Источник ClickUp: {source_id}")
     
     tasks = get_tasks_from_source(source_id)
     
     if not tasks:
-        log.error("Не найдено задач. Проверь ID.")
+        log.error("Не найдено задач. Проверь ID источника.")
         return
     
     for task in tasks:
