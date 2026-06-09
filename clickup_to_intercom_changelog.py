@@ -43,7 +43,6 @@ def get_all_tasks_from_source(source_id):
     
     while True:
         params["page"] = page
-        
         r = cu.get(f"https://api.clickup.com/api/v2/list/{source_id}/task", params=params)
         if r.status_code != 200:
             r = cu.get(f"https://api.clickup.com/api/v2/view/{source_id}/task", params=params)
@@ -57,54 +56,48 @@ def get_all_tasks_from_source(source_id):
             if len(tasks) < 100:
                 break
             page += 1
-            time.sleep(0.5)
+            time.sleep(0.4)
         else:
-            log.error(f"Ошибка ClickUp: {r.status_code}")
+            log.error(f"ClickUp ошибка: {r.status_code}")
             break
     
     log.info(f"✅ Всего загружено {len(all_tasks)} задач из ClickUp")
     return all_tasks
 
-def get_clickup_task(task_id):
-    r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", 
-               params={"subtasks": "true", "include_subtasks": "true"})
-    if r.status_code == 200:
-        return r.json()
-    return None
-
-def find_article_by_title(title_prefix):
-    """Проверяем, существует ли уже гайд по названию релиза"""
+def get_existing_articles():
+    """Загружаем все существующие гайды один раз в начале"""
+    existing = {}
     page = 1
     while True:
         r = ic.get(f"{INTERCOM_BASE}/internal_articles", 
                   params={"page": page, "per_page": 50})
         if r.status_code != 200:
             break
-        articles = r.json().get("data", [])
-        for art in articles:
-            if title_prefix.lower() in art.get("title", "").lower():
-                return art
-        if page >= r.json().get("pages", {}).get("total_pages", 1):
+        data = r.json()
+        for art in data.get("data", []):
+            title = art.get("title", "")
+            # Извлекаем основное название без [ID]
+            clean_name = title.split(" release [")[0].strip()
+            existing[clean_name.lower()] = art
+        if page >= data.get("pages", {}).get("total_pages", 1):
             break
         page += 1
         time.sleep(0.3)
-    return None
+    log.info(f"Загружено {len(existing)} существующих гайдов из Intercom")
+    return existing
 
-def create_release_guide(main_task):
-    name = main_task.get("name", "Без названия")
+def create_release_guide(main_task, existing_articles):
+    name = main_task.get("name", "Без названия").strip()
     task_id = main_task.get("id")
-    subtasks = main_task.get("subtasks", [])
     
-    # Проверяем существование
-    existing = find_article_by_title(name)
-    if existing:
-        log.info(f"⏭️  Пропускаем (уже существует): {name}")
+    if name.lower() in existing_articles:
+        log.info(f"⏭️ Пропускаем (уже существует): {name}")
         return
     
+    subtasks = main_task.get("subtasks", [])
     new_title = f"{name} release [{task_id}]"[:255]
     
     lines = [f"<h1>{html.escape(name)} release</h1>"]
-    
     if subtasks:
         lines.append("<ul>")
         for sub in subtasks:
@@ -125,7 +118,7 @@ def create_release_guide(main_task):
         "folder_id": DEFAULT_FOLDER_ID
     }
     
-    log.info(f"✨ Создаём новый гайд: {new_title}")
+    log.info(f"✨ Создаём: {new_title}")
     r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if r.status_code in (200, 201):
@@ -143,18 +136,26 @@ def main():
     log.info(f"Источник ClickUp: {source_id}")
     
     tasks = get_all_tasks_from_source(source_id)
-    
     if not tasks:
         log.error("Не найдено задач.")
         return
     
+    existing_articles = get_existing_articles()
+    
     for task in tasks:
-        full_task = get_clickup_task(task["id"])
+        full_task = get_clickup_task(task["id"]) if task.get("subtasks") is None else task
         if full_task:
-            create_release_guide(full_task)
-            time.sleep(1.2)  # rate limit
+            create_release_guide(full_task, existing_articles)
+            time.sleep(1.0)
     
     log.info("🎉 Синхронизация завершена!")
+
+def get_clickup_task(task_id):
+    r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", 
+               params={"subtasks": "true", "include_subtasks": "true"})
+    if r.status_code == 200:
+        return r.json()
+    return None
 
 if __name__ == "__main__":
     main()
