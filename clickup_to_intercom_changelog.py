@@ -32,10 +32,9 @@ ic.headers.update({
 })
 
 def get_all_tasks_from_source(source_id):
-    """Улучшенная пагинация для View/List"""
     all_tasks = []
     page = 0
-    max_pages = 20  # защита от бесконечного цикла
+    max_pages = 30  # защита
     
     while page < max_pages:
         params = {
@@ -46,39 +45,34 @@ def get_all_tasks_from_source(source_id):
             "page": page
         }
         
-        log.info(f"Запрос страницы {page}...")
+        log.info(f"Запрос страницы {page} из ClickUp...")
         
-        # Сначала пробуем List, потом View
-        endpoints = [
-            f"https://api.clickup.com/api/v2/list/{source_id}/task",
-            f"https://api.clickup.com/api/v2/view/{source_id}/task"
-        ]
-        
-        data = None
-        for url in endpoints:
+        # Пробуем оба эндпоинта
+        for endpoint in [f"list/{source_id}/task", f"view/{source_id}/task"]:
+            url = f"https://api.clickup.com/api/v2/{endpoint}"
             r = cu.get(url, params=params)
+            
             if r.status_code == 200:
                 data = r.json()
-                break
+                tasks = data.get("tasks", [])
+                all_tasks.extend(tasks)
+                log.info(f"✅ Получено {len(tasks)} задач со страницы {page} ({endpoint})")
+                
+                if len(tasks) < 100:
+                    log.info("Последняя страница — завершаем загрузку")
+                    return all_tasks  # выходим раньше
+                break  # если успешно — не пробуем второй endpoint
             elif r.status_code == 400:
                 continue  # пробуем следующий endpoint
         
-        if not data:
-            log.error(f"Не удалось получить данные на странице {page}")
-            break
-        
-        tasks = data.get("tasks", [])
-        all_tasks.extend(tasks)
-        log.info(f"Получено {len(tasks)} задач (страница {page})")
-        
-        if len(tasks) < 100:
-            log.info("Последняя страница — выходим")
+        else:
+            log.error(f"Не удалось получить страницу {page}")
             break
             
         page += 1
-        time.sleep(0.7)
+        time.sleep(0.8)
     
-    log.info(f"✅ Всего загружено {len(all_tasks)} задач из ClickUp")
+    log.info(f"✅ Всего загружено {len(all_tasks)} задач")
     return all_tasks
 
 def get_existing_articles_in_folder(folder_id):
@@ -86,13 +80,8 @@ def get_existing_articles_in_folder(folder_id):
     page = 1
     while True:
         r = ic.get(f"{INTERCOM_BASE}/internal_articles", 
-                  params={
-                      "page": page, 
-                      "per_page": 50,
-                      "folder_id": folder_id
-                  })
+                  params={"page": page, "per_page": 50, "folder_id": folder_id})
         if r.status_code != 200:
-            log.warning(f"Intercom error: {r.status_code}")
             break
         data = r.json()
         for art in data.get("data", []):
@@ -103,17 +92,14 @@ def get_existing_articles_in_folder(folder_id):
             break
         page += 1
         time.sleep(0.4)
-    
     log.info(f"Загружено {len(existing)} гайдов из папки {folder_id}")
     return existing
 
 def create_release_guide(main_task, existing_articles):
     name = main_task.get("name", "").strip()
-    if not name:
-        return
-    
-    if name.lower() in existing_articles:
-        log.info(f"⏭️ Пропускаем: {name}")
+    if not name or name.lower() in existing_articles:
+        if name:
+            log.info(f"⏭️ Пропускаем: {name}")
         return
     
     task_id = main_task.get("id")
@@ -129,8 +115,6 @@ def create_release_guide(main_task, existing_articles):
             if sub_name:
                 lines.append(f"  <li>{sub_name}</li>")
         lines.append("</ul>")
-    else:
-        lines.append("<p><em>В релизе нет подзадач.</em></p>")
     
     body = "\n".join(lines)
     
@@ -148,7 +132,7 @@ def create_release_guide(main_task, existing_articles):
     if r.status_code in (200, 201):
         log.info("✅ Создан")
     else:
-        log.error(f"❌ Intercom ошибка {r.status_code}: {r.text}")
+        log.error(f"❌ Intercom ошибка {r.status_code}")
 
 def main():
     folder_id = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_FOLDER_ID)
@@ -156,11 +140,12 @@ def main():
     
     current_folder = int(folder_id) if str(folder_id).isdigit() else DEFAULT_FOLDER_ID
     
-    log.info(f"Запуск синхронизации → Папка Intercom: {current_folder} | View/List: {source_id}")
+    log.info(f"Запуск → Папка: {current_folder} | Source: {source_id}")
     
     tasks = get_all_tasks_from_source(source_id)
+    
     if not tasks:
-        log.error("Не удалось получить задачи из ClickUp")
+        log.error("Не удалось загрузить задачи")
         return
     
     existing_articles = get_existing_articles_in_folder(current_folder)
@@ -171,14 +156,12 @@ def main():
             create_release_guide(full_task, existing_articles)
             time.sleep(1.0)
     
-    log.info("🎉 Синхронизация завершена!")
+    log.info("🎉 Готово!")
 
 def get_clickup_task(task_id):
     r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", 
                params={"subtasks": "true", "include_subtasks": "true"})
-    if r.status_code == 200:
-        return r.json()
-    return None
+    return r.json() if r.status_code == 200 else None
 
 if __name__ == "__main__":
     main()
