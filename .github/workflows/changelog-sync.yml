@@ -2,7 +2,7 @@ name: Sync ClickUp Changelog to Intercom
 
 on:
   schedule:
-    - cron: '0 0 * * 6'  # каждый день в 8:00 UTC
+    - cron: '0 0 * * 0'  # каждый день в 8:00 UTC
   workflow_dispatch:     # можно запускать вручную
 
 jobs:
