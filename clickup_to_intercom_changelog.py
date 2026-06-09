@@ -30,31 +30,30 @@ ic.headers.update({
 })
 
 def get_tasks_from_list(list_id):
-    """Получаем задачи из List"""
     params = {
-        "subtasks": "true",
+        "subtasks": "false",        # не пытаемся получить здесь
         "include_closed": "true",
         "order_by": "created",
-        "reverse": "true",
-        "page": 0
+        "reverse": "true"
     }
-    
     r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
     if r.status_code == 200:
         tasks = r.json().get("tasks", [])
-        log.info(f"Получено {len(tasks)} задач из списка")
+        log.info(f"Получено {len(tasks)} главных задач из списка")
         return tasks
     else:
         log.error(f"ClickUp error {r.status_code}: {r.text}")
         return []
 
 def get_clickup_task(task_id):
-    """Получаем полную задачу с сабтасками"""
+    """Получаем задачу + ВСЕ subtasks"""
     r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", 
-               params={"subtasks": "true"})
+               params={"subtasks": "true", "include_subtasks": "true"})
     if r.status_code == 200:
         return r.json()
-    return None
+    else:
+        log.error(f"Не удалось получить задачу {task_id}: {r.status_code}")
+        return None
 
 def find_article_by_title(title_prefix):
     page = 1
@@ -74,23 +73,26 @@ def find_article_by_title(title_prefix):
 def create_test_guide(main_task_id):
     task = get_clickup_task(main_task_id)
     if not task:
-        log.error("Не удалось получить главную задачу")
         return
     
     name = task.get("name", "Без названия")
     subtasks = task.get("subtasks", [])
     
     log.info(f"Релиз: {name}")
-    log.info(f"Найдено сабтасков: {len(subtasks)}")
+    log.info(f"Сабтасков: {len(subtasks)}")
     
-    # Формируем HTML-контент
+    # === Формируем безопасный HTML для Intercom ===
     lines = [f"<h1>{html.escape(name)}</h1>"]
-    lines.append("<ul>")
-    for sub in subtasks:
-        sub_name = html.escape(sub.get("name", ""))
-        status = html.escape(sub.get("status", {}).get("status", "unknown"))
-        lines.append(f"<li>{sub_name} <em>({status})</em></li>")
-    lines.append("</ul>")
+    
+    if subtasks:
+        lines.append("<ul>")
+        for sub in subtasks:
+            sub_name = html.escape(sub.get("name", ""))
+            status = html.escape(sub.get("status", {}).get("status", "unknown"))
+            lines.append(f"  <li>{sub_name} <em>({status})</em></li>")
+        lines.append("</ul>")
+    else:
+        lines.append("<p><em>В этом релизе пока нет подзадач.</em></p>")
     
     body = "\n".join(lines)
     new_title = f"{name} [{main_task_id}]"[:255]
@@ -110,22 +112,22 @@ def create_test_guide(main_task_id):
         log.info(f"🔄 Обновляем статью {art_id}")
         r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art_id}", json=payload)
     else:
-        log.info(f"✨ Создаём новую статью: {new_title}")
+        log.info(f"✨ Создаём новую: {new_title}")
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if r.status_code in (200, 201):
-        log.info("✅ УСПЕШНО СОЗДАНО / ОБНОВЛЕНО!")
+        log.info("✅ УСПЕШНО!")
     else:
         log.error(f"❌ Intercom ошибка {r.status_code}: {r.text}")
 
 if __name__ == "__main__":
-    LIST_ID = "901212763746"          # ← твой List ID
+    LIST_ID = "901212763746"
     tasks = get_tasks_from_list(LIST_ID)
     
     if tasks:
-        # Берём первую главную задачу (самый свежий релиз)
-        first_main_task = tasks[0]    # можно поменять индекс
-        log.info(f"Тестируем релиз: {first_main_task['name']}")
-        create_test_guide(first_main_task["id"])
+        # Тестируем самый свежий релиз
+        first_task = tasks[0]
+        log.info(f"Тестируем: {first_task['name']} (ID: {first_task['id']})")
+        create_test_guide(first_task["id"])
     else:
-        log.error("Задачи не найдены в списке")
+        log.error("Задачи не найдены")
