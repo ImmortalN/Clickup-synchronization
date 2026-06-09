@@ -85,21 +85,40 @@ def get_all_tasks_from_source(source_id):
 def get_existing_articles_in_folder(folder_id):
     existing = {}
     page = 1
+    target_folder_str = str(folder_id) # приводим к строке для надежного сравнения
+    
+    log.info(f"Запрашиваем статьи из Intercom и фильтруем по папке {target_folder_str}...")
+    
     while True:
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", 
-                  params={"page": page, "per_page": 50, "folder_id": folder_id})
+        # Запрашиваем общим списком, так как фильтр по папке в URL не работает
+        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
+        
         if r.status_code != 200:
+            log.error(f"Ошибка получения статей из Intercom: {r.status_code}")
             break
+            
         data = r.json()
-        for art in data.get("data", []):
-            title = art.get("title", "")
-            clean_name = title.split(" release [")[0].strip()
-            existing[clean_name.lower()] = art
+        articles = data.get("data", [])
+        if not articles:
+            break
+            
+        for art in articles:
+            # Проверяем, относится ли статья к нашей целевой папке
+            current_art_folder = str(art.get("folder_id") or "")
+            
+            if current_art_folder == target_folder_str:
+                title = art.get("title", "")
+                # Отсекаем хвост " release [task_id]", чтобы получить чистый заголовок
+                clean_name = title.split(" release [")[0].strip()
+                existing[clean_name.lower()] = art
+                
         if page >= data.get("pages", {}).get("total_pages", 1):
             break
+            
         page += 1
-        time.sleep(0.4)
-    log.info(f"Загружено {len(existing)} гайдов из папки {folder_id}")
+        time.sleep(0.2) # Небольшая задержка, чтобы не спамить API
+        
+    log.info(f"✅ Найдено именно в папке {target_folder_str}: {len(existing)} гайдов (всего проверено страниц: {page})")
     return existing
 
 def create_release_guide(main_task, existing_articles):
