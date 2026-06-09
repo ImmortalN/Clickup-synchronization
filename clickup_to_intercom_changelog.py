@@ -31,7 +31,7 @@ ic.headers.update({
 
 def get_tasks_from_list(list_id):
     params = {
-        "subtasks": "false",        # не пытаемся получить здесь
+        "subtasks": "false",
         "include_closed": "true",
         "order_by": "created",
         "reverse": "true"
@@ -39,20 +39,19 @@ def get_tasks_from_list(list_id):
     r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
     if r.status_code == 200:
         tasks = r.json().get("tasks", [])
-        log.info(f"Получено {len(tasks)} главных задач из списка")
+        log.info(f"Получено {len(tasks)} главных задач")
         return tasks
     else:
         log.error(f"ClickUp error {r.status_code}: {r.text}")
         return []
 
 def get_clickup_task(task_id):
-    """Получаем задачу + ВСЕ subtasks"""
     r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", 
                params={"subtasks": "true", "include_subtasks": "true"})
     if r.status_code == 200:
         return r.json()
     else:
-        log.error(f"Не удалось получить задачу {task_id}: {r.status_code}")
+        log.error(f"Не удалось получить задачу {task_id}")
         return None
 
 def find_article_by_title(title_prefix):
@@ -81,7 +80,7 @@ def create_test_guide(main_task_id):
     log.info(f"Релиз: {name}")
     log.info(f"Сабтасков: {len(subtasks)}")
     
-    # === Формируем безопасный HTML для Intercom ===
+    # HTML контент
     lines = [f"<h1>{html.escape(name)}</h1>"]
     
     if subtasks:
@@ -97,12 +96,15 @@ def create_test_guide(main_task_id):
     body = "\n".join(lines)
     new_title = f"{name} [{main_task_id}]"[:255]
     
+    # === Основной payload + Fin AI ===
     payload = {
         "title": new_title,
         "body": body[:50000],
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
-        "folder_id": DEFAULT_FOLDER_ID
+        "folder_id": DEFAULT_FOLDER_ID,
+        "ai_agent_availability": True,      # Для Fin AI Agent
+        "ai_copilot_availability": True     # Для Copilot
     }
     
     existing = find_article_by_title(name)
@@ -116,7 +118,7 @@ def create_test_guide(main_task_id):
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if r.status_code in (200, 201):
-        log.info("✅ УСПЕШНО!")
+        log.info("✅ УСПЕШНО! (Fin AI включён)")
     else:
         log.error(f"❌ Intercom ошибка {r.status_code}: {r.text}")
 
@@ -125,8 +127,7 @@ if __name__ == "__main__":
     tasks = get_tasks_from_list(LIST_ID)
     
     if tasks:
-        # Тестируем самый свежий релиз
-        first_task = tasks[0]
+        first_task = tasks[0]   # самый свежий
         log.info(f"Тестируем: {first_task['name']} (ID: {first_task['id']})")
         create_test_guide(first_task["id"])
     else:
