@@ -2,7 +2,9 @@ import os
 import html
 import logging
 import requests
+import time
 from dotenv import load_dotenv
+from collections import defaultdict
 
 load_dotenv()
 
@@ -30,6 +32,7 @@ ic.headers.update({
 })
 
 def get_tasks_from_list(list_id):
+    """Получаем все главные задачи из списка"""
     params = {
         "subtasks": "false",
         "include_closed": "true",
@@ -39,13 +42,14 @@ def get_tasks_from_list(list_id):
     r = cu.get(f"https://api.clickup.com/api/v2/list/{list_id}/task", params=params)
     if r.status_code == 200:
         tasks = r.json().get("tasks", [])
-        log.info(f"Получено {len(tasks)} главных задач")
+        log.info(f"Получено {len(tasks)} главных задач из ClickUp")
         return tasks
     else:
         log.error(f"ClickUp error {r.status_code}: {r.text}")
         return []
 
 def get_clickup_task(task_id):
+    """Получаем одну задачу со всеми сабтасками"""
     r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", 
                params={"subtasks": "true", "include_subtasks": "true"})
     if r.status_code == 200:
@@ -55,10 +59,12 @@ def get_clickup_task(task_id):
         return None
 
 def find_article_by_title(title_prefix):
+    """Ищем статью по названию релиза"""
     page = 1
     while True:
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
-        if r.status_code != 200: 
+        r = ic.get(f"{INTERCOM_BASE}/internal_articles", 
+                  params={"page": page, "per_page": 50})
+        if r.status_code != 200:
             break
         articles = r.json().get("data", [])
         for art in articles:
@@ -67,32 +73,31 @@ def find_article_by_title(title_prefix):
         if page >= r.json().get("pages", {}).get("total_pages", 1):
             break
         page += 1
+        time.sleep(0.3)
     return None
 
-def create_test_guide(main_task_id):
-    task = get_clickup_task(main_task_id)
-    if not task:
-        return
+def create_or_update_release_guide(main_task):
+    name = main_task.get("name", "Без названия")
+    task_id = main_task.get("id")
+    subtasks = main_task.get("subtasks", [])
     
-    name = task.get("name", "Без названия")
-    subtasks = task.get("subtasks", [])
+    # Название гайда: "JetBooking 3.8.1 release"
+    new_title = f"{name} release [{task_id}]"[:255]
     
-    log.info(f"Релиз: {name}")
-    log.info(f"Сабтасков: {len(subtasks)}")
+    # Контент — только названия сабтасков (без статуса)
+    lines = [f"<h1>{html.escape(name)} release</h1>"]
     
-    lines = [f"<h1>{html.escape(name)}</h1>"]
     if subtasks:
         lines.append("<ul>")
         for sub in subtasks:
-            sub_name = html.escape(sub.get("name", ""))
-            status = html.escape(sub.get("status", {}).get("status", "unknown"))
-            lines.append(f"  <li>{sub_name} <em>({status})</em></li>")
+            sub_name = html.escape(sub.get("name", "").strip())
+            if sub_name:
+                lines.append(f"  <li>{sub_name}</li>")
         lines.append("</ul>")
     else:
-        lines.append("<p><em>В этом релизе пока нет подзадач.</em></p>")
+        lines.append("<p><em>В релизе нет подзадач.</em></p>")
     
     body = "\n".join(lines)
-    new_title = f"{name} [{main_task_id}]"[:255]
     
     payload = {
         "title": new_title,
@@ -100,34 +105,50 @@ def create_test_guide(main_task_id):
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
         "folder_id": DEFAULT_FOLDER_ID
-        # ai_*_availability НЕ РАБОТАЕТ здесь для internal_articles
     }
     
     existing = find_article_by_title(name)
     
     if existing:
         art_id = existing["id"]
-        log.info(f"🔄 Обновляем статью {art_id}")
+        log.info(f"🔄 Обновляем: {new_title}")
         r = ic.put(f"{INTERCOM_BASE}/internal_articles/{art_id}", json=payload)
     else:
-        log.info(f"✨ Создаём новую: {new_title}")
+        log.info(f"✨ Создаём: {new_title}")
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if r.status_code in (200, 201):
-        log.info("✅ Статья создана/обновлена!")
-        log.info("⚠️  Fin AI нужно включить вручную в интерфейсе Intercom (или через другой endpoint)")
+        log.info("✅ Успешно")
         if not existing and r.json().get("id"):
-            log.info(f"Ссылка: https://app.intercom.com/a/articles/{r.json()['id']}")
+            log.info(f"   → https://app.intercom.com/a/articles/{r.json()['id']}")
     else:
         log.error(f"❌ Intercom ошибка {r.status_code}: {r.text}")
 
-if __name__ == "__main__":
-    LIST_ID = "901212763746"
-    tasks = get_tasks_from_list(LIST_ID)
+def main():
+    # Можно передать аргументы: python script.py FOLDER_ID LIST_ID
+    target_folder = sys.argv[1] if len(sys.argv) > 1 else None
+    list_id = sys.argv[2] if len(sys.argv) > 2 else "901212763746"
     
-    if tasks:
-        first_task = tasks[0]
-        log.info(f"Тестируем: {first_task['name']} (ID: {first_task['id']})")
-        create_test_guide(first_task["id"])
-    else:
-        log.error("Задачи не найдены")
+    if target_folder and target_folder.isdigit():
+        global DEFAULT_FOLDER_ID
+        DEFAULT_FOLDER_ID = int(target_folder)
+    
+    log.info(f"Запуск синхронизации ченжлогов в папку Intercom: {DEFAULT_FOLDER_ID}")
+    
+    tasks = get_tasks_from_list(list_id)
+    
+    if not tasks:
+        log.error("Не найдено задач в ClickUp")
+        return
+    
+    for task in tasks:
+        full_task = get_clickup_task(task["id"])
+        if full_task:
+            create_or_update_release_guide(full_task)
+            time.sleep(1.2)  # небольшой пауза для rate limit
+    
+    log.info("🎉 Синхронизация завершена!")
+
+if __name__ == "__main__":
+    import sys
+    main()
