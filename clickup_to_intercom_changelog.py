@@ -4,6 +4,7 @@ import logging
 import requests
 import time
 import sys
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -85,14 +86,12 @@ def get_all_tasks_from_source(source_id):
 def get_existing_articles_in_folder(folder_id):
     existing = {}
     page = 1
-    target_folder_str = str(folder_id) # приводим к строке для надежного сравнения
+    target_folder_str = str(folder_id)
     
     log.info(f"Запрашиваем статьи из Intercom и фильтруем по папке {target_folder_str}...")
     
     while True:
-        # Запрашиваем общим списком, так как фильтр по папке в URL не работает
         r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
-        
         if r.status_code != 200:
             log.error(f"Ошибка получения статей из Intercom: {r.status_code}")
             break
@@ -103,23 +102,25 @@ def get_existing_articles_in_folder(folder_id):
             break
             
         for art in articles:
-            # Проверяем, относится ли статья к нашей целевой папке
             current_art_folder = str(art.get("folder_id") or "")
             
             if current_art_folder == target_folder_str:
                 title = art.get("title", "")
-                # Отсекаем хвост " release [task_id]", чтобы получить чистый заголовок
-                clean_name = title.split(" release [")[0].strip()
+                
+                # Теперь заголовок содержит дату, например: "Имя релиза (09.06.2026) release [id]"
+                # Чтобы получить чистое имя для проверки дубликатов, отсекаем всё начиная с даты или слова release
+                clean_name = title.split(" (")[0].split(" release")[0].strip()
                 existing[clean_name.lower()] = art
                 
         if page >= data.get("pages", {}).get("total_pages", 1):
             break
             
         page += 1
-        time.sleep(0.2) # Небольшая задержка, чтобы не спамить API
+        time.sleep(0.2)
         
-    log.info(f"✅ Найдено именно в папке {target_folder_str}: {len(existing)} гайдов (всего проверено страниц: {page})")
+    log.info(f"✅ Найдено именно в папке {target_folder_str}: {len(existing)} гайдов")
     return existing
+
 
 def create_release_guide(main_task, existing_articles):
     name = main_task.get("name", "").strip()
@@ -131,15 +132,29 @@ def create_release_guide(main_task, existing_articles):
     task_id = main_task.get("id")
     subtasks = main_task.get("subtasks", [])
     
-    new_title = f"{name} release [{task_id}]"[:255]
+    # Получаем дату создания таска из ClickUp (она приходит в миллисекундах)
+    date_created_ms = main_task.get("date_created")
+    date_str = ""
+    if date_created_ms:
+        # Переводим миллисекунды в секунды и форматируем в ДД.ММ.ГГГГ
+        date_str = datetime.fromtimestamp(int(date_created_ms) / 1000).strftime('%d.%m.%Y')
+
+    # Формируем красивый заголовок с датой релиза
+    # Получится: "Имя Таска (09.06.2026) release [task_id]"
+    if date_str:
+        new_title = f"{name} ({date_str}) release [{task_id}]"[:255]
+        h1_title = f"{html.escape(name)} ({date_str}) release"
+    else:
+        new_title = f"{name} release [{task_id}]"[:255]
+        h1_title = f"{html.escape(name)} release"
     
-    lines = [f"<h1>{html.escape(name)} release</h1>"]
+    lines = [f"<h1>{h1_title}</h1>"]
     if subtasks:
         lines.append("<ul>")
         for sub in subtasks:
             sub_name = html.escape(sub.get("name", "").strip())
             if sub_name:
-                lines.append(f"  <li>{sub_name}</li>")
+                lines.append(f"  <li>{sub_name}</li>")  # Для сабтасков дату не добавляем, как вы и просили
         lines.append("</ul>")
     
     body = "\n".join(lines)
@@ -152,7 +167,7 @@ def create_release_guide(main_task, existing_articles):
         "folder_id": DEFAULT_FOLDER_ID
     }
     
-    log.info(f"✨ Создаём: {name}")
+    log.info(f"✨ Создаём: {new_title}")
     r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
     
     if r.status_code in (200, 201):
