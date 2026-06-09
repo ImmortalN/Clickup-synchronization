@@ -34,7 +34,7 @@ ic.headers.update({
 def get_all_tasks_from_source(source_id):
     all_tasks = []
     page = 0
-    max_pages = 30  # защита
+    max_pages = 50  # Немного увеличим лимит страниц для надежности
     
     while page < max_pages:
         params = {
@@ -42,31 +42,38 @@ def get_all_tasks_from_source(source_id):
             "include_closed": "true",
             "order_by": "created",
             "reverse": "true",
-            "page": page
+            "page": page,
+            "include_timl": "true"  # Включаем задачи, которые находятся в нескольких списках
         }
         
         log.info(f"Запрос страницы {page} из ClickUp...")
+        page_has_tasks = False
         
         # Пробуем оба эндпоинта
         for endpoint in [f"list/{source_id}/task", f"view/{source_id}/task"]:
             url = f"https://api.clickup.com/api/v2/{endpoint}"
-            r = cu.get(url, params=params)
-            
-            if r.status_code == 200:
-                data = r.json()
-                tasks = data.get("tasks", [])
-                all_tasks.extend(tasks)
-                log.info(f"✅ Получено {len(tasks)} задач со страницы {page} ({endpoint})")
+            try:
+                r = cu.get(url, params=params)
                 
-                if len(tasks) < 100:
-                    log.info("Последняя страница — завершаем загрузку")
-                    return all_tasks  # выходим раньше
-                break  # если успешно — не пробуем второй endpoint
-            elif r.status_code == 400:
-                continue  # пробуем следующий endpoint
+                if r.status_code == 200:
+                    data = r.json()
+                    tasks = data.get("tasks", [])
+                    
+                    if tasks:
+                        all_tasks.extend(tasks)
+                        log.info(f"✅ Получено {len(tasks)} задач со страницы {page} ({endpoint})")
+                        page_has_tasks = True
+                    break  # Если эндпоинт успешно ответил, второй не дергаем
+                    
+                elif r.status_code == 400:
+                    continue  # Пробуем следующий эндпоинт
+            except Exception as e:
+                log.error(f"Ошибка запроса к {endpoint}: {e}")
+                continue
         
-        else:
-            log.error(f"Не удалось получить страницу {page}")
+        # Если ни один эндпоинт не вернул задач для этой страницы — значит, мы точно дошли до конца
+        if not page_has_tasks:
+            log.info(f"На странице {page} задач больше нет. Завершаем сбор.")
             break
             
         page += 1
@@ -99,7 +106,7 @@ def create_release_guide(main_task, existing_articles):
     name = main_task.get("name", "").strip()
     if not name or name.lower() in existing_articles:
         if name:
-            log.info(f"⏭️ Пропускаем: {name}")
+            log.info(f"⏭️ Пропускаем (уже есть в Intercom): {name}")
         return
     
     task_id = main_task.get("id")
@@ -132,7 +139,7 @@ def create_release_guide(main_task, existing_articles):
     if r.status_code in (200, 201):
         log.info("✅ Создан")
     else:
-        log.error(f"❌ Intercom ошибка {r.status_code}")
+        log.error(f"❌ Intercom ошибка {r.status_code}: {r.text}")
 
 def main():
     folder_id = sys.argv[1] if len(sys.argv) > 1 else str(DEFAULT_FOLDER_ID)
