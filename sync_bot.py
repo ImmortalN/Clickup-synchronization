@@ -43,25 +43,60 @@ ic.headers.update({
 # ==============================
 
 def process_image_links(text: str) -> str:
-    if not text: return text
+    if not text:
+        return text
+
+    # Убираем markdown-ссылки, оставляя только URL (существующая логика)
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
     def transform_url(match):
         url = match.group(0).strip()
+        original_url = url
+
+        # === Imgur ===
+        if "imgur.com" in url:
+            # imgur.com/abc123 → i.imgur.com/abc123.jpg
+            if "/gallery/" in url or "/a/" in url:
+                # Для галерей/альбомов — оставляем как есть (сложно)
+                return url
+            img_id = re.search(r'imgur\.com/([a-zA-Z0-9]+)', url)
+            if img_id:
+                direct = f"https://i.imgur.com/{img_id.group(1)}.jpg"
+                return f'<img src="{direct}" style="max-width:100%;">'
+
+        # === icecream.me ===
+        if "icecream.me" in url:
+            # Пример: http://icecream.me/c05c317d91d76e2b898366940a09c5e3
+            # Прямая ссылка обычно: https://icecream.me/uploads/... но проще — HEAD-редирект
+            try:
+                r = requests.head(url, timeout=8, allow_redirects=True)
+                final_url = r.url
+                if final_url != url and re.search(r'\.(png|jpe?g|gif|webp)', final_url.lower()):
+                    return f'<img src="{final_url}" style="max-width:100%;">'
+            except:
+                pass
+            # Альтернатива: часто работает добавление /image или просто оставить, но попробуем
+            return f'<img src="{url}" style="max-width:100%;">'
+
+        # === snipboard (уже было) ===
         if "snipboard.io" in url and "i.snipboard.io" not in url:
             img_id = url.split('/')[-1]
-            if img_id: return f'<img src="https://i.snipboard.io/{img_id}.jpg" style="max-width:100%;">'
+            if img_id:
+                return f'<img src="https://i.snipboard.io/{img_id}.jpg" style="max-width:100%;">'
 
+        # === Прямые изображения по расширению ===
         if re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()):
             return f'<img src="{url}" style="max-width:100%;">'
 
+        # === monosnap / take.ms (уже было) ===
         if "monosnap.ai" in url or "take.ms" in url:
             current_url = url
             if "take.ms" in url:
                 try:
                     r_head = requests.head(url, timeout=5, allow_redirects=True)
                     current_url = r_head.url
-                except: pass
+                except:
+                    pass
             match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
             if match_id:
                 img_id = match_id.group(1)
@@ -70,10 +105,14 @@ def process_image_links(text: str) -> str:
                     r = requests.get(api_url, timeout=10, headers={"Referer": current_url}, allow_redirects=True)
                     if r.status_code == 200 and "api.monosnap.ai" not in r.url:
                         return f'<img src="{r.url}" style="max-width:100%;">'
-                except: pass
-        return url
+                except:
+                    pass
 
-    return re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
+        return url  # если ничего не подошло — оставляем как есть
+
+    # Применяем ко всем http/https ссылкам
+    text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
+    return text
 
 def get_clickup_task(task_id):
     try:
@@ -135,7 +174,7 @@ def sync_single_article(art, is_force=True):
         log.info(f"🔄 Обновление: {name}")
         payload = {
             "title": new_title,
-            "body": new_body[:50000],
+            "body": new_body[:80000],
             "owner_id": INTERCOM_OWNER_ID,
             "author_id": INTERCOM_AUTHOR_ID,
             "folder_id": current_folder
