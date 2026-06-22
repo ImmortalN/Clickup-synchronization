@@ -46,50 +46,68 @@ def process_image_links(text: str) -> str:
     if not text:
         return text
 
-    # Убираем markdown-ссылки, оставляя только URL (существующая логика)
+    # Убираем markdown ссылки
     text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
 
     def transform_url(match):
         url = match.group(0).strip()
         original_url = url
 
-        # === Imgur ===
+        # === Imgur (уже работает) ===
         if "imgur.com" in url:
-            # imgur.com/abc123 → i.imgur.com/abc123.jpg
             if "/gallery/" in url or "/a/" in url:
-                # Для галерей/альбомов — оставляем как есть (сложно)
                 return url
-            img_id = re.search(r'imgur\.com/([a-zA-Z0-9]+)', url)
-            if img_id:
-                direct = f"https://i.imgur.com/{img_id.group(1)}.jpg"
+            img_id_match = re.search(r'imgur\.com/([a-zA-Z0-9]+)', url)
+            if img_id_match:
+                direct = f"https://i.imgur.com/{img_id_match.group(1)}.jpg"
+                log.debug(f"Imgur → {direct}")
                 return f'<img src="{direct}" style="max-width:100%;">'
 
-        # === icecream.me ===
+        # === icecream.me — главная правка ===
         if "icecream.me" in url:
-            # Пример: http://icecream.me/c05c317d91d76e2b898366940a09c5e3
-            # Прямая ссылка обычно: https://icecream.me/uploads/... но проще — HEAD-редирект
             try:
-                r = requests.head(url, timeout=8, allow_redirects=True)
-                final_url = r.url
-                if final_url != url and re.search(r'\.(png|jpe?g|gif|webp)', final_url.lower()):
-                    return f'<img src="{final_url}" style="max-width:100%;">'
-            except:
-                pass
-            # Альтернатива: часто работает добавление /image или просто оставить, но попробуем
-            return f'<img src="{url}" style="max-width:100%;">'
+                # Получаем финальный URL после редиректов
+                r_head = requests.head(url, timeout=10, allow_redirects=True)
+                final_url = r_head.url
 
-        # === snipboard (уже было) ===
+                # Пробуем вытащить прямую картинку через парсинг страницы
+                if "icecream.me" in final_url:
+                    r = requests.get(url, timeout=10)
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    
+                    # Ищем img с upload или cdn
+                    img_tag = soup.find('img', src=re.compile(r'upload|cdn|images', re.I))
+                    if img_tag and img_tag.get('src'):
+                        src = img_tag['src']
+                        if not src.startswith('http'):
+                            src = 'https://icecream.me' + src if src.startswith('/') else src
+                        log.debug(f"Icecream parsed → {src}")
+                        return f'<img src="{src}" style="max-width:100%;">'
+
+                # Если HEAD дал прямую картинку
+                if re.search(r'\.(png|jpe?g|gif|webp)', final_url.lower()):
+                    log.debug(f"Icecream HEAD redirect → {final_url}")
+                    return f'<img src="{final_url}" style="max-width:100%;">'
+
+            except Exception as e:
+                log.warning(f"Не удалось обработать icecream {url}: {e}")
+
+            # Fallback — оставляем оригинал (Intercom всё равно откажет, но хотя бы видно)
+            return url
+
+        # === snipboard ===
         if "snipboard.io" in url and "i.snipboard.io" not in url:
             img_id = url.split('/')[-1]
             if img_id:
                 return f'<img src="https://i.snipboard.io/{img_id}.jpg" style="max-width:100%;">'
 
-        # === Прямые изображения по расширению ===
+        # === Прямые изображения ===
         if re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()):
             return f'<img src="{url}" style="max-width:100%;">'
 
-        # === monosnap / take.ms (уже было) ===
+        # === monosnap / take.ms ===
         if "monosnap.ai" in url or "take.ms" in url:
+            # ... (оставь как было)
             current_url = url
             if "take.ms" in url:
                 try:
@@ -102,15 +120,14 @@ def process_image_links(text: str) -> str:
                 img_id = match_id.group(1)
                 api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
                 try:
-                    r = requests.get(api_url, timeout=10, headers={"Referer": current_url}, allow_redirects=True)
+                    r = requests.get(api_url, timeout=10, headers={"Referer": current_url})
                     if r.status_code == 200 and "api.monosnap.ai" not in r.url:
                         return f'<img src="{r.url}" style="max-width:100%;">'
                 except:
                     pass
 
-        return url  # если ничего не подошло — оставляем как есть
+        return url
 
-    # Применяем ко всем http/https ссылкам
     text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
     return text
 
