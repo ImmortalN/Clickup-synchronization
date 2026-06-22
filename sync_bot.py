@@ -62,48 +62,55 @@ def process_image_links(text: str) -> str:
                 return f'<img src="{direct}" style="max-width:100%;">'
 
         # === Imgur ALBUM / GALLERY ===
+                # === Imgur ALBUM / GALLERY ===
         if "imgur.com/a/" in url or "imgur.com/gallery/" in url:
             try:
                 log.info(f"Обрабатываем Imgur альбом: {url}")
-                r = requests.get(url, timeout=12, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                })
-                if r.status_code != 200:
-                    return url
-
-                soup = BeautifulSoup(r.text, 'html.parser')
-
-                # Основные селекторы для Imgur альбомов
-                images = []
-                # Вариант 1: data-src / src в img
-                for img in soup.find_all('img', attrs={'data-src': True}):
-                    src = img.get('data-src') or img.get('src')
-                    if src and 'i.imgur.com' in src:
-                        images.append(src)
-
-                # Вариант 2: ссылки с i.imgur.com
-                for link in soup.find_all('a', href=True):
-                    href = link.get('href')
-                    if href and 'i.imgur.com' in href and re.search(r'\.(jpg|png|gif|webp)', href):
-                        images.append(href)
-
-                # Убираем дубликаты
-                images = list(dict.fromkeys(images))
-
-                if images:
-                    html_images = []
-                    for img_url in images[:8]:  # лимит 8 картинок, чтобы не раздуть статью
-                        if not img_url.startswith('http'):
-                            img_url = 'https:' + img_url if img_url.startswith('//') else img_url
-                        html_images.append(f'<img src="{img_url}" style="max-width:100%; margin: 10px 0;">')
+                
+                # Простой и надёжный способ — вытаскиваем ID альбома и строим прямые ссылки
+                album_id = re.search(r'imgur\.com/(?:a|gallery)/([a-zA-Z0-9]+)', url)
+                if album_id:
+                    album_hash = album_id.group(1)
                     
-                    log.info(f"Найдено {len(images)} картинок в альбоме")
-                    return ''.join(html_images)  # возвращаем все картинки сразу
-
+                    # Пробуем несколько популярных паттернов прямых ссылок
+                    images = [
+                        f"https://i.imgur.com/{album_hash}.jpg",
+                        f"https://i.imgur.com/{album_hash}.png",
+                        f"https://i.imgur.com/{album_hash}_d.jpg",   # часто лучший вариант
+                    ]
+                    
+                    # Дополнительно пробуем найти другие изображения через простой запрос
+                    r = requests.get(url, timeout=10, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    })
+                    soup = BeautifulSoup(r.text, 'html.parser')
+                    
+                    for img in soup.find_all('img', src=True):
+                        src = img.get('src') or img.get('data-src')
+                        if src and 'i.imgur.com' in src and src not in images:
+                            if not src.startswith('http'):
+                                src = 'https:' + src if src.startswith('//') else src
+                            images.append(src)
+                    
+                    # Убираем дубли
+                    images = list(dict.fromkeys([u for u in images if u]))
+                    
+                    if images:
+                        html_images = []
+                        for img_url in images[:6]:   # ограничиваем, чтобы не раздуть статью
+                            html_images.append(
+                                f'<img src="{img_url}" style="max-width:100%; margin: 12px 0; display:block;">'
+                            )
+                        log.info(f"✅ Вставлено {len(images)} картинок из альбома {album_hash}")
+                        return ''.join(html_images)
+                    else:
+                        log.warning(f"Не найдено прямых ссылок для альбома {album_hash}")
+                        
             except Exception as e:
-                log.warning(f"Не удалось распарсить Imgur альбом {url}: {e}")
-
-            return url  # fallback
+                log.warning(f"Ошибка при обработке Imgur альбома {url}: {e}")
+            
+            # Если ничего не получилось — оставляем оригинальную ссылку
+            return url
 
         # === icecream.me (уже работает) ===
         if "icecream.me" in url:
