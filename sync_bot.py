@@ -63,9 +63,8 @@ def make_link_tag(url: str, text: str = None) -> str:
 
 def resolve_monosnap(url: str) -> str:
     """
-    Пытается получить прямой URL картинки Monosnap.
-    Если не получается — возвращает кликабельную ссылку вместо <img>,
-    чтобы Intercom не падал с unsupported_html.
+    Получает прямой URL картинки Monosnap и вставляет <img>.
+    Текстовая ссылка — только если резолв полностью провалился.
     """
     original = url
     try:
@@ -76,11 +75,11 @@ def resolve_monosnap(url: str) -> str:
             try:
                 r_head = requests.head(url, timeout=8, allow_redirects=True, headers=DEFAULT_HEADERS)
                 current_url = r_head.url or url
-                log.info(f"Monosnap short link resolved: {url} → {current_url}")
+                log.info(f"Monosnap short link: {url} → {current_url}")
             except Exception as e:
                 log.warning(f"Monosnap take.ms resolve failed ({url}): {e}")
 
-        # Пытаемся вытащить file id
+        # file id из URL
         match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
         if not match_id:
             match_id = re.search(r'monosnap\.ai/(?:file|image)/([a-zA-Z0-9]+)', current_url)
@@ -91,37 +90,42 @@ def resolve_monosnap(url: str) -> str:
             try:
                 r = requests.get(
                     api_url,
-                    timeout=12,
+                    timeout=15,
                     allow_redirects=True,
                     headers={**DEFAULT_HEADERS, "Referer": current_url},
                 )
-                final = r.url or ""
-                # Успех: получили прямой URL картинки, не api.monosnap.ai
-                if r.status_code == 200 and final and "api.monosnap.ai" not in final:
-                    # Cloudfront иногда отдаёт URL, который Intercom не может скачать.
-                    # Пробуем всё же вставить как img, но если это явный временный/сложный URL —
-                    # лучше ссылка. На практике Intercom часто принимает cloudfront,
-                    # но падает на URL с %2B / длинными encoded именами.
-                    if is_image_url(final) or "cloudfront.net" in final or "monosnap" in final:
-                        # Предпочитаем img только если URL выглядит относительно «чистым»
-                        if "%" in final and len(final) > 180:
-                            log.warning(f"Monosnap: длинный encoded URL, ставим ссылку вместо img: {final[:120]}...")
-                            return make_link_tag(original, "Monosnap screenshot")
-                        log.info(f"✅ Monosnap image resolved: {final[:100]}")
-                        return make_img_tag(final)
-            except Exception as e:
-                log.warning(f"Monosnap API download failed ({img_id}): {e}")
+                final = (r.url or "").strip()
 
-        # Если уже прямая картинка
+                # Успешный редирект на реальный файл
+                if r.status_code == 200 and final and "api.monosnap.ai" not in final:
+                    log.info(f"✅ Monosnap image: {final[:120]}")
+                    return make_img_tag(final)
+
+                # Иногда API отдаёт 200, но URL остаётся api — пробуем Content-Location / history
+                if r.history:
+                    last = r.history[-1].headers.get("Location") or final
+                    if last and "api.monosnap.ai" not in last:
+                        log.info(f"✅ Monosnap image (redirect): {last[:120]}")
+                        return make_img_tag(last)
+
+            except Exception as e:
+                log.warning(f"Monosnap API failed ({img_id}): {e}")
+
+            # Запасной вариант: прямая ссылка download как src
+            # (иногда Intercom может её открыть сам)
+            download_guess = f"https://api.monosnap.ai/file/download?id={img_id}"
+            log.info(f"Monosnap: пробуем API download URL как img src для {img_id}")
+            return make_img_tag(download_guess)
+
         if is_image_url(current_url):
             return make_img_tag(current_url)
 
     except Exception as e:
         log.warning(f"Monosnap error {url}: {e}")
 
-    # Fallback: обычная ссылка — Intercom не пытается ingest image
-    log.info(f"Monosnap fallback → link: {original}")
-    return make_link_tag(original, "Monosnap screenshot")
+    # Совсем не удалось — оставляем кликабельную ссылку (не ломаем статью)
+    log.warning(f"Monosnap fallback → link: {original}")
+    return make_link_tag(original, original)
 
 
 def resolve_imgur(url: str) -> str:
@@ -169,7 +173,7 @@ def resolve_imgur(url: str) -> str:
     except Exception as e:
         log.warning(f"Imgur error {url}: {e}")
 
-    return make_link_tag(url, "Imgur")
+    return make_link_tag(url, url)
 
 
 def resolve_icecream(url: str) -> str:
@@ -189,7 +193,7 @@ def resolve_icecream(url: str) -> str:
             return make_img_tag(src)
     except Exception as e:
         log.warning(f"Icecream error {url}: {e}")
-    return make_link_tag(url, "Screenshot")
+    return make_link_tag(url, url)
 
 
 def transform_bare_url(url: str) -> str:
@@ -213,47 +217,36 @@ def transform_bare_url(url: str) -> str:
     if is_image_url(url):
         return make_img_tag(url)
 
-    # Обычная ссылка — оставляем как URL (markdown потом не трогает уже HTML),
-    # но лучше сделать кликабельной
     return make_link_tag(url)
 
 
 def process_image_links(text: str) -> str:
     """
     1) Markdown-ссылки [текст](url):
-       - если url — картинка/скриншот-сервис → <img> (или fallback link)
-       - иначе → <a href="url">текст</a>  (сохраняем текст ссылки!)
+       - картинка/скриншот-сервис → <img>
+       - иначе → <a href="url">текст</a>
     2) Голые URL → картинка или <a>
     """
     if not text:
         return text
 
-    # --- 1. Markdown links [text](url) ---
     def replace_md_link(match):
         link_text = match.group(1)
         url = match.group(2).strip()
 
-        # Скриншот-сервисы и прямые картинки — пробуем как image
         if any(host in url for host in (
             "imgur.com", "icecream.me", "snipboard.io",
             "monosnap.ai", "take.ms"
         )) or is_image_url(url):
-            # Для картинок текст ссылки не важен — вставляем img/fallback
             return transform_bare_url(url)
 
-        # Обычная текстовая ссылка — сохраняем якорь
         return make_link_tag(url, link_text)
 
     text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', replace_md_link, text)
 
-    # --- 2. Bare URLs (которые ещё не внутри href="...") ---
     def replace_bare_url(match):
-        url = match.group(0)
-        # Не трогаем URL, которые уже внутри HTML-атрибутов
-        return transform_bare_url(url)
+        return transform_bare_url(match.group(0))
 
-    # Не матчим URL, которые уже в href="..." или src="..."
-    # Простой подход: заменяем только URL, перед которыми нет =" 
     text = re.sub(
         r'(?<![="\'>])(https?://[^\s\)\'\"<>]+)',
         replace_bare_url,
@@ -282,7 +275,6 @@ def get_clickup_task(task_id):
 
 
 def find_article_by_task_id(task_id):
-    """Ищет существующую статью в Intercom по ID задачи ClickUp в заголовке"""
     page = 1
     while True:
         r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
@@ -305,10 +297,6 @@ def find_article_by_task_id(task_id):
 
 
 def parse_timestamp(value):
-    """
-    Преобразует updated_at / date_updated в unix timestamp (секунды).
-    ClickUp отдаёт миллисекунды (число или строка), Intercom — секунды или ISO.
-    """
     if value is None:
         return 0.0
 
@@ -333,7 +321,6 @@ def parse_timestamp(value):
 
 
 def format_ts(ts):
-    """Безопасное форматирование timestamp для логов"""
     if not ts:
         return "нет"
     try:
@@ -426,7 +413,6 @@ def sync_single_article(art, is_force=True):
 
 
 def create_or_update_by_clickup_id(task_id, target_folder_id=None):
-    """Создает новую статью или обновляет существующую с проверкой ответа API"""
     task_data = get_clickup_task(task_id)
     if not task_data or task_data == "DELETED":
         log.error(f"❌ Ошибка: Задача ClickUp {task_id} не найдена.")
@@ -465,22 +451,16 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None):
             log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
 
 
-# ==============================
-# ГЛАВНЫЙ ПРОЦЕСС
-# ==============================
-
 def main():
     target_folder = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else None
     specific_ids = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
     clickup_task_id = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
 
-    # Сценарий 1: по ID задачи ClickUp (всегда force)
     if clickup_task_id:
         log.info(f"--- РЕЖИМ ОДНОЙ ЗАДАЧИ CLICKUP: {clickup_task_id} ---")
         create_or_update_by_clickup_id(clickup_task_id, target_folder)
         return
 
-    # Сценарий 2: по ID статей Intercom (всегда force)
     if specific_ids:
         ids = [i.strip() for i in specific_ids.split(",")]
         log.info(f"--- РЕЖИМ ТОЧЕЧНОГО ОБНОВЛЕНИЯ INTERCOM: {len(ids)} шт. ---")
@@ -492,7 +472,6 @@ def main():
                 log.error(f"Статья {aid} не найдена в Intercom.")
         return
 
-    # Сценарий 3: массовая синхронизация
     is_scheduled = os.getenv("IS_SCHEDULED", "").lower() in ("true", "1", "yes")
 
     if is_scheduled and not target_folder:
