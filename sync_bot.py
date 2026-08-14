@@ -51,20 +51,17 @@ def process_image_links(text: str) -> str:
 
     def transform_url(match):
         url = match.group(0).strip()
-        original_url = url
 
-                # === Imgur SINGLE + ALBUM (без API) ===
+        # === Imgur SINGLE + ALBUM (без API) ===
         if "imgur.com" in url:
             try:
                 log.info(f"Обрабатываем Imgur: {url}")
-                
+
                 album_match = re.search(r'imgur\.com/(?:a|gallery)/([a-zA-Z0-9]+)', url)
-                
                 images = []
-                
+
                 if album_match:
                     album_hash = album_match.group(1)
-                    # Основные рабочие паттерны (по твоему примеру)
                     candidates = [
                         f"https://i.imgur.com/{album_hash}.jpg",
                         f"https://i.imgur.com/{album_hash}.png",
@@ -74,14 +71,13 @@ def process_image_links(text: str) -> str:
                         f"https://i.imgur.com/{album_hash}_3.jpg",
                     ]
                     images.extend(candidates)
-                    
-                    # Пытаемся вытащить реальные ссылки из HTML (иногда проскакивают)
+
                     headers = {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
                     }
                     r = requests.get(url, timeout=15, headers=headers)
                     soup = BeautifulSoup(r.text, 'html.parser')
-                    
+
                     for tag in soup.find_all(['img', 'source', 'a']):
                         for attr in ['src', 'data-src', 'href', 'data-url']:
                             val = tag.get(attr)
@@ -89,32 +85,29 @@ def process_image_links(text: str) -> str:
                                 if not val.startswith('http'):
                                     val = 'https:' + val if val.startswith('//') else val
                                 images.append(val)
-                
                 else:
-                    # Одиночная картинка
                     single_match = re.search(r'imgur\.com/([a-zA-Z0-9]{5,})', url)
                     if single_match:
                         h = single_match.group(1)
                         images.append(f"https://i.imgur.com/{h}.jpg")
-                
-                # Убираем дубли и фильтруем
+
                 images = list(dict.fromkeys([u for u in images if u]))
-                
+
                 if images:
                     html_images = []
-                    for img_url in images[:8]:   # лимит
+                    for img_url in images[:8]:
                         html_images.append(
                             f'<img src="{img_url}" style="max-width:100%; margin:12px 0; display:block;" alt="Screenshot from ClickUp">'
                         )
                     log.info(f"✅ Imgur: найдено и вставлено {len(images)} ссылок")
                     return "".join(html_images)
-                    
+
             except Exception as e:
                 log.warning(f"Imgur error {url}: {e}")
-            
-            return url  # fallback
 
-        # === icecream.me (уже работает) ===
+            return url
+
+        # === icecream.me ===
         if "icecream.me" in url:
             try:
                 r_head = requests.head(url, timeout=10, allow_redirects=True)
@@ -134,7 +127,7 @@ def process_image_links(text: str) -> str:
                 log.warning(f"Icecream error {url}: {e}")
             return url
 
-        # === Остальные обработчики (snipboard, прямые ссылки, monosnap) ===
+        # === snipboard, прямые ссылки, monosnap ===
         if "snipboard.io" in url and "i.snipboard.io" not in url:
             img_id = url.split('/')[-1]
             if img_id:
@@ -144,13 +137,12 @@ def process_image_links(text: str) -> str:
             return f'<img src="{url}" style="max-width:100%;">'
 
         if "monosnap.ai" in url or "take.ms" in url:
-            # ... твой старый код monosnap ...
             current_url = url
             if "take.ms" in url:
                 try:
                     r_head = requests.head(url, timeout=5, allow_redirects=True)
                     current_url = r_head.url
-                except:
+                except Exception:
                     pass
             match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
             if match_id:
@@ -160,7 +152,7 @@ def process_image_links(text: str) -> str:
                     r = requests.get(api_url, timeout=10, headers={"Referer": current_url})
                     if r.status_code == 200 and "api.monosnap.ai" not in r.url:
                         return f'<img src="{r.url}" style="max-width:100%;">'
-                except:
+                except Exception:
                     pass
 
         return url
@@ -168,63 +160,131 @@ def process_image_links(text: str) -> str:
     text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
     return text
 
+
 def get_clickup_task(task_id):
     try:
-        r = cu.get(f"https://api.clickup.com/api/v2/task/{task_id}", params={"include_markdown_description": "true"})
+        r = cu.get(
+            f"https://api.clickup.com/api/v2/task/{task_id}",
+            params={"include_markdown_description": "true"},
+            timeout=20
+        )
         if r.status_code == 200:
             return r.json()
         elif r.status_code == 404:
             return "DELETED"
-    except: pass
+        else:
+            log.warning(f"ClickUp API {r.status_code} для задачи {task_id}: {r.text[:200]}")
+    except Exception as e:
+        log.warning(f"Ошибка получения задачи ClickUp {task_id}: {e}")
     return None
+
 
 def find_article_by_task_id(task_id):
     """Ищет существующую статью в Intercom по ID задачи ClickUp в заголовке"""
     page = 1
     while True:
         r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
-        if r.status_code != 200: break
+        if r.status_code != 200:
+            break
         data = r.json()
         articles = data.get("data", [])
-        if not articles: break
-        
+        if not articles:
+            break
+
         for art in articles:
             if f"[{task_id}]" in art.get("title", ""):
                 return art
-        
-        if page >= data.get("pages", {}).get("total_pages", 1): break
+
+        if page >= data.get("pages", {}).get("total_pages", 1):
+            break
         page += 1
         time.sleep(0.3)
     return None
+
+
+def parse_timestamp(value):
+    """Преобразует updated_at / date_updated в unix timestamp (секунды)"""
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        # ClickUp отдаёт миллисекунды, Intercom обычно секунды
+        return value / 1000 if value > 1e12 else float(value)
+    if isinstance(value, str):
+        try:
+            # ISO формат
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except Exception:
+            try:
+                return float(value)
+            except Exception:
+                return 0
+    return 0
+
 
 def sync_single_article(art, is_force=True):
     article_id = art["id"]
     title = art.get("title", "")
     current_folder = art.get("parent_id") or art.get("folder_id")
-    
+
     match = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
-    if not match: return False
-    
+    if not match:
+        return False
+
     task_id = match.group(1)
     task_data = get_clickup_task(task_id)
 
     if task_data == "DELETED":
         log.warning(f"🗑️ Задача {task_id} удалена. Чистим Intercom...")
-        ic.delete(f"{INTERCOM_BASE}/internal_articles/{article_id}")
+        try:
+            ic.delete(f"{INTERCOM_BASE}/internal_articles/{article_id}")
+            log.info(f"✅ Статья {article_id} удалена")
+        except Exception as e:
+            log.error(f"Ошибка удаления статьи {article_id}: {e}")
         return True
 
-    if task_data:
-        name = task_data.get("name")
-        desc = task_data.get("markdown_description") or task_data.get("description") or ""
-        
-        new_title = f"{name} [{task_id}]"[:255]
-        body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
-        new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
+    if not task_data:
+        log.warning(f"⚠ Не удалось получить задачу ClickUp {task_id}, пропускаем")
+        return False
 
-        if not is_force:
-            if art.get("title") == new_title and art.get("body") == new_body:
+    name = task_data.get("name") or ""
+    desc = task_data.get("markdown_description") or task_data.get("description") or ""
+
+    new_title = f"{name} [{task_id}]"[:255]
+    body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
+    new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
+
+    should_update = is_force
+
+    if not is_force:
+        clickup_ts = parse_timestamp(task_data.get("date_updated"))
+        intercom_ts = parse_timestamp(art.get("updated_at"))
+
+        # Если задача в ClickUp обновлялась позже, чем статья в Intercom — обновляем
+        if clickup_ts > intercom_ts + 10:  # небольшой буфер 10 сек
+            should_update = True
+            log.info(
+                f"📅 ClickUp новее (CU: {datetime.fromtimestamp(clickup_ts).isoformat()} > "
+                f"IC: {datetime.fromtimestamp(intercom_ts).isoformat() if intercom_ts else 'нет'}) → {name}"
+            )
+        else:
+            # Fallback: сравнение контента
+            title_same = art.get("title") == new_title
+            body_same = art.get("body") == new_body
+
+            if title_same and body_same:
+                log.info(f"⏭ Пропущено (дата и контент без изменений): {name}")
                 return False
+            else:
+                should_update = True
+                reason = []
+                if not title_same:
+                    reason.append("title")
+                if not body_same:
+                    reason.append("body")
+                log.info(f"📝 Контент отличается ({', '.join(reason)}) → обновляем: {name}")
 
+    if should_update:
         log.info(f"🔄 Обновление: {name}")
         payload = {
             "title": new_title,
@@ -233,9 +293,20 @@ def sync_single_article(art, is_force=True):
             "author_id": INTERCOM_AUTHOR_ID,
             "folder_id": current_folder
         }
-        ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload)
-        return True
+        try:
+            r = ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload, timeout=30)
+            if r.status_code in (200, 201):
+                log.info(f"✅ Успешно обновлено: {name}")
+                return True
+            else:
+                log.error(f"❌ Ошибка обновления {article_id} ({r.status_code}): {r.text[:300]}")
+                return False
+        except Exception as e:
+            log.error(f"❌ Исключение при обновлении {article_id}: {e}")
+            return False
+
     return False
+
 
 def create_or_update_by_clickup_id(task_id, target_folder_id=None):
     """Создает новую статью или обновляет существующую с проверкой ответа API"""
@@ -244,7 +315,7 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None):
         log.error(f"❌ Ошибка: Задача ClickUp {task_id} не найдена.")
         return
 
-    name = task_data.get("name")
+    name = task_data.get("name") or ""
     desc = task_data.get("markdown_description") or task_data.get("description") or ""
     new_title = f"{name} [{task_id}]"[:255]
     body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
@@ -253,28 +324,29 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None):
 
     payload = {
         "title": new_title,
-        "body": new_body[:50000],
+        "body": new_body[:100000],
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
         "folder_id": folder_id
     }
 
     existing_art = find_article_by_task_id(task_id)
-    
+
     if existing_art:
         log.info(f"🔄 Обновление статьи {existing_art['id']}: {new_title}")
-        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload)
-        if r.status_code in [200, 201]:
+        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload, timeout=30)
+        if r.status_code in (200, 201):
             log.info("✅ Успешно обновлено")
         else:
-            log.error(f"❌ Ошибка API ({r.status_code}): {r.text}")
+            log.error(f"❌ Ошибка API ({r.status_code}): {r.text[:300]}")
     else:
         log.info(f"✨ Создание новой статьи: {new_title}")
-        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload)
-        if r.status_code in [200, 201]:
+        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
+        if r.status_code in (200, 201):
             log.info(f"✅ Успешно создано. ID: {r.json().get('id')}")
         else:
-            log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text}")
+            log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
+
 
 # ==============================
 # ГЛАВНЫЙ ПРОЦЕСС
@@ -312,29 +384,41 @@ def main():
             return
 
     folder_to_scan = target_folder or str(DEFAULT_FOLDER_ID)
-    is_force = target_folder is not None 
-    
-    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) ---")
+    is_force = target_folder is not None
 
+    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) | force={is_force} ---")
+
+    updated_count = 0
+    skipped_count = 0
     page = 1
+
     while True:
         r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
-        if r.status_code != 200: break
-        
+        if r.status_code != 200:
+            log.error(f"Ошибка получения списка статей Intercom: {r.status_code}")
+            break
+
         data = r.json()
         articles = data.get("data", [])
-        if not articles: break
+        if not articles:
+            break
 
         for art in articles:
             current_folder = str(art.get("parent_id") or art.get("folder_id") or "")
             if current_folder == folder_to_scan:
-                sync_single_article(art, is_force=is_force)
+                result = sync_single_article(art, is_force=is_force)
+                if result:
+                    updated_count += 1
+                else:
+                    skipped_count += 1
 
-        if page >= data.get("pages", {}).get("total_pages", 1): break
+        if page >= data.get("pages", {}).get("total_pages", 1):
+            break
         page += 1
         time.sleep(0.5)
 
-    log.info("--- СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА ---")
+    log.info(f"--- СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА | обновлено: {updated_count}, пропущено: {skipped_count} ---")
+
 
 if __name__ == "__main__":
     main()
