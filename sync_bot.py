@@ -42,6 +42,11 @@ DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
 }
 
+SCREENSHOT_HOSTS = (
+    "imgur.com", "icecream.me", "snipboard.io",
+    "monosnap.ai", "take.ms",
+)
+
 # ==============================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==============================
@@ -52,25 +57,40 @@ def is_image_url(url: str) -> bool:
     return bool(re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()))
 
 
+def is_screenshot_url(url: str) -> bool:
+    return any(host in url for host in SCREENSHOT_HOSTS) or is_image_url(url)
+
+
 def make_img_tag(src: str, alt: str = "Screenshot") -> str:
-    return f'<img src="{html.escape(src, quote=True)}" style="max-width:100%; margin:12px 0; display:block;" alt="{html.escape(alt)}">'
+    return (
+        f'<img src="{html.escape(src, quote=True)}" '
+        f'style="max-width:100%; margin:12px 0; display:block;" '
+        f'alt="{html.escape(alt)}">'
+    )
 
 
 def make_link_tag(url: str, text: str = None) -> str:
-    label = text if text else url
+    """Кликабельная ссылка. text=None → показываем сам URL."""
+    label = text if text is not None else url
     return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
 
 
-def resolve_monosnap(url: str) -> str:
+def fallback_link(url: str, link_text: str = None) -> str:
     """
-    Получает прямой URL картинки Monosnap и вставляет <img>.
-    Текстовая ссылка — только если резолв полностью провалился.
+    Если картинку получить не удалось:
+    - был якорный текст → оставляем <a>текст</a>
+    - была просто ссылка → оставляем ссылку с URL как текстом
     """
-    original = url
+    if link_text:
+        return make_link_tag(url, link_text)
+    return make_link_tag(url, url)
+
+
+def resolve_monosnap(url: str, link_text: str = None) -> str:
+    """Пробуем <img>. При неудаче — исходная ссылка / якорный текст."""
     try:
         current_url = url
 
-        # Короткие ссылки take.ms → полный URL
         if "take.ms" in url:
             try:
                 r_head = requests.head(url, timeout=8, allow_redirects=True, headers=DEFAULT_HEADERS)
@@ -79,7 +99,6 @@ def resolve_monosnap(url: str) -> str:
             except Exception as e:
                 log.warning(f"Monosnap take.ms resolve failed ({url}): {e}")
 
-        # file id из URL
         match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
         if not match_id:
             match_id = re.search(r'monosnap\.ai/(?:file|image)/([a-zA-Z0-9]+)', current_url)
@@ -96,12 +115,10 @@ def resolve_monosnap(url: str) -> str:
                 )
                 final = (r.url or "").strip()
 
-                # Успешный редирект на реальный файл
                 if r.status_code == 200 and final and "api.monosnap.ai" not in final:
                     log.info(f"✅ Monosnap image: {final[:120]}")
                     return make_img_tag(final)
 
-                # Иногда API отдаёт 200, но URL остаётся api — пробуем Content-Location / history
                 if r.history:
                     last = r.history[-1].headers.get("Location") or final
                     if last and "api.monosnap.ai" not in last:
@@ -111,24 +128,17 @@ def resolve_monosnap(url: str) -> str:
             except Exception as e:
                 log.warning(f"Monosnap API failed ({img_id}): {e}")
 
-            # Запасной вариант: прямая ссылка download как src
-            # (иногда Intercom может её открыть сам)
-            download_guess = f"https://api.monosnap.ai/file/download?id={img_id}"
-            log.info(f"Monosnap: пробуем API download URL как img src для {img_id}")
-            return make_img_tag(download_guess)
-
         if is_image_url(current_url):
             return make_img_tag(current_url)
 
     except Exception as e:
         log.warning(f"Monosnap error {url}: {e}")
 
-    # Совсем не удалось — оставляем кликабельную ссылку (не ломаем статью)
-    log.warning(f"Monosnap fallback → link: {original}")
-    return make_link_tag(original, original)
+    log.info(f"Monosnap: оставляем исходную ссылку → {url}")
+    return fallback_link(url, link_text)
 
 
-def resolve_imgur(url: str) -> str:
+def resolve_imgur(url: str, link_text: str = None) -> str:
     try:
         log.info(f"Обрабатываем Imgur: {url}")
 
@@ -167,16 +177,16 @@ def resolve_imgur(url: str) -> str:
 
         if images:
             html_images = [make_img_tag(img_url) for img_url in images[:8]]
-            log.info(f"✅ Imgur: найдено и вставлено {len(images)} ссылок")
+            log.info(f"✅ Imgur: вставлено {len(images)} изображений")
             return "".join(html_images)
 
     except Exception as e:
         log.warning(f"Imgur error {url}: {e}")
 
-    return make_link_tag(url, url)
+    return fallback_link(url, link_text)
 
 
-def resolve_icecream(url: str) -> str:
+def resolve_icecream(url: str, link_text: str = None) -> str:
     try:
         r_head = requests.head(url, timeout=10, allow_redirects=True, headers=DEFAULT_HEADERS)
         final_url = r_head.url
@@ -193,59 +203,60 @@ def resolve_icecream(url: str) -> str:
             return make_img_tag(src)
     except Exception as e:
         log.warning(f"Icecream error {url}: {e}")
-    return make_link_tag(url, url)
+    return fallback_link(url, link_text)
 
 
-def transform_bare_url(url: str) -> str:
-    """Обрабатывает голый URL (не из markdown-ссылки)."""
+def transform_url(url: str, link_text: str = None) -> str:
+    """
+    url — адрес
+    link_text — якорный текст из [text](url), либо None если была голая ссылка
+    """
     url = url.strip()
 
     if "imgur.com" in url:
-        return resolve_imgur(url)
+        return resolve_imgur(url, link_text)
 
     if "icecream.me" in url:
-        return resolve_icecream(url)
+        return resolve_icecream(url, link_text)
 
     if "snipboard.io" in url and "i.snipboard.io" not in url:
         img_id = url.rstrip('/').split('/')[-1]
         if img_id:
             return make_img_tag(f"https://i.snipboard.io/{img_id}.jpg")
+        return fallback_link(url, link_text)
 
     if "monosnap.ai" in url or "take.ms" in url:
-        return resolve_monosnap(url)
+        return resolve_monosnap(url, link_text)
 
     if is_image_url(url):
         return make_img_tag(url)
 
-    return make_link_tag(url)
+    # Обычная ссылка (не скриншот)
+    return fallback_link(url, link_text)
 
 
 def process_image_links(text: str) -> str:
     """
-    1) Markdown-ссылки [текст](url):
-       - картинка/скриншот-сервис → <img>
-       - иначе → <a href="url">текст</a>
-    2) Голые URL → картинка или <a>
+    Правила:
+    1) [текст](url) — обычная ссылка → <a href="url">текст</a>
+    2) [текст](screenshot-url) — пробуем картинку; если нет → <a>текст</a>
+    3) голый screenshot-url — пробуем картинку; если нет → <a>url</a>
+    4) голый обычный url → <a>url</a>
     """
     if not text:
         return text
 
+    # 1. Markdown-ссылки [text](url)
     def replace_md_link(match):
         link_text = match.group(1)
         url = match.group(2).strip()
-
-        if any(host in url for host in (
-            "imgur.com", "icecream.me", "snipboard.io",
-            "monosnap.ai", "take.ms"
-        )) or is_image_url(url):
-            return transform_bare_url(url)
-
-        return make_link_tag(url, link_text)
+        return transform_url(url, link_text=link_text)
 
     text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', replace_md_link, text)
 
+    # 2. Голые URL (не внутри уже созданных href/src)
     def replace_bare_url(match):
-        return transform_bare_url(match.group(0))
+        return transform_url(match.group(0), link_text=None)
 
     text = re.sub(
         r'(?<![="\'>])(https?://[^\s\)\'\"<>]+)',
