@@ -377,16 +377,20 @@ def main():
         return
 
     # Сценарий 3: Массовая синхронизация по папке
-    if not target_folder:
+    # Проверка чётной недели только для автоматического (scheduled) запуска
+    is_scheduled = os.getenv("IS_SCHEDULED", "").lower() in ("true", "1", "yes")
+
+    if is_scheduled and not target_folder:
         week_number = datetime.now().isocalendar()[1]
         if week_number % 2 != 0:
             log.info("Сегодня нечетная неделя. Пропускаем автоматику.")
             return
 
     folder_to_scan = target_folder or str(DEFAULT_FOLDER_ID)
-    is_force = target_folder is not None
+    # При ручном запуске (даже без folder_id) — force=True, чтобы всегда обновлять
+    is_force = not is_scheduled
 
-    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) | force={is_force} ---")
+    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) | force={is_force} | scheduled={is_scheduled} ---")
 
     updated_count = 0
     skipped_count = 0
