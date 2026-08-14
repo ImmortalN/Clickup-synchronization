@@ -38,126 +38,228 @@ ic.headers.update({
     "Content-Type": "application/json"
 })
 
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
+}
+
 # ==============================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==============================
 
+def is_image_url(url: str) -> bool:
+    if not url:
+        return False
+    return bool(re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()))
+
+
+def make_img_tag(src: str, alt: str = "Screenshot") -> str:
+    return f'<img src="{html.escape(src, quote=True)}" style="max-width:100%; margin:12px 0; display:block;" alt="{html.escape(alt)}">'
+
+
+def make_link_tag(url: str, text: str = None) -> str:
+    label = text if text else url
+    return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+
+
+def resolve_monosnap(url: str) -> str:
+    """
+    Пытается получить прямой URL картинки Monosnap.
+    Если не получается — возвращает кликабельную ссылку вместо <img>,
+    чтобы Intercom не падал с unsupported_html.
+    """
+    original = url
+    try:
+        current_url = url
+
+        # Короткие ссылки take.ms → полный URL
+        if "take.ms" in url:
+            try:
+                r_head = requests.head(url, timeout=8, allow_redirects=True, headers=DEFAULT_HEADERS)
+                current_url = r_head.url or url
+                log.info(f"Monosnap short link resolved: {url} → {current_url}")
+            except Exception as e:
+                log.warning(f"Monosnap take.ms resolve failed ({url}): {e}")
+
+        # Пытаемся вытащить file id
+        match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
+        if not match_id:
+            match_id = re.search(r'monosnap\.ai/(?:file|image)/([a-zA-Z0-9]+)', current_url)
+
+        if match_id:
+            img_id = match_id.group(1)
+            api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
+            try:
+                r = requests.get(
+                    api_url,
+                    timeout=12,
+                    allow_redirects=True,
+                    headers={**DEFAULT_HEADERS, "Referer": current_url},
+                )
+                final = r.url or ""
+                # Успех: получили прямой URL картинки, не api.monosnap.ai
+                if r.status_code == 200 and final and "api.monosnap.ai" not in final:
+                    # Cloudfront иногда отдаёт URL, который Intercom не может скачать.
+                    # Пробуем всё же вставить как img, но если это явный временный/сложный URL —
+                    # лучше ссылка. На практике Intercom часто принимает cloudfront,
+                    # но падает на URL с %2B / длинными encoded именами.
+                    if is_image_url(final) or "cloudfront.net" in final or "monosnap" in final:
+                        # Предпочитаем img только если URL выглядит относительно «чистым»
+                        if "%" in final and len(final) > 180:
+                            log.warning(f"Monosnap: длинный encoded URL, ставим ссылку вместо img: {final[:120]}...")
+                            return make_link_tag(original, "Monosnap screenshot")
+                        log.info(f"✅ Monosnap image resolved: {final[:100]}")
+                        return make_img_tag(final)
+            except Exception as e:
+                log.warning(f"Monosnap API download failed ({img_id}): {e}")
+
+        # Если уже прямая картинка
+        if is_image_url(current_url):
+            return make_img_tag(current_url)
+
+    except Exception as e:
+        log.warning(f"Monosnap error {url}: {e}")
+
+    # Fallback: обычная ссылка — Intercom не пытается ingest image
+    log.info(f"Monosnap fallback → link: {original}")
+    return make_link_tag(original, "Monosnap screenshot")
+
+
+def resolve_imgur(url: str) -> str:
+    try:
+        log.info(f"Обрабатываем Imgur: {url}")
+
+        album_match = re.search(r'imgur\.com/(?:a|gallery)/([a-zA-Z0-9]+)', url)
+        images = []
+
+        if album_match:
+            album_hash = album_match.group(1)
+            candidates = [
+                f"https://i.imgur.com/{album_hash}.jpg",
+                f"https://i.imgur.com/{album_hash}.png",
+                f"https://i.imgur.com/{album_hash}_d.jpg",
+                f"https://i.imgur.com/{album_hash}_1.jpg",
+                f"https://i.imgur.com/{album_hash}_2.jpg",
+                f"https://i.imgur.com/{album_hash}_3.jpg",
+            ]
+            images.extend(candidates)
+
+            r = requests.get(url, timeout=15, headers=DEFAULT_HEADERS)
+            soup = BeautifulSoup(r.text, 'html.parser')
+
+            for tag in soup.find_all(['img', 'source', 'a']):
+                for attr in ['src', 'data-src', 'href', 'data-url']:
+                    val = tag.get(attr)
+                    if val and 'i.imgur.com' in val and val not in images:
+                        if not val.startswith('http'):
+                            val = 'https:' + val if val.startswith('//') else val
+                        images.append(val)
+        else:
+            single_match = re.search(r'imgur\.com/([a-zA-Z0-9]{5,})', url)
+            if single_match:
+                h = single_match.group(1)
+                images.append(f"https://i.imgur.com/{h}.jpg")
+
+        images = list(dict.fromkeys([u for u in images if u]))
+
+        if images:
+            html_images = [make_img_tag(img_url) for img_url in images[:8]]
+            log.info(f"✅ Imgur: найдено и вставлено {len(images)} ссылок")
+            return "".join(html_images)
+
+    except Exception as e:
+        log.warning(f"Imgur error {url}: {e}")
+
+    return make_link_tag(url, "Imgur")
+
+
+def resolve_icecream(url: str) -> str:
+    try:
+        r_head = requests.head(url, timeout=10, allow_redirects=True, headers=DEFAULT_HEADERS)
+        final_url = r_head.url
+        if is_image_url(final_url):
+            return make_img_tag(final_url)
+
+        r = requests.get(url, timeout=10, headers=DEFAULT_HEADERS)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        img_tag = soup.find('img', src=re.compile(r'upload|cdn|images', re.I))
+        if img_tag and img_tag.get('src'):
+            src = img_tag['src']
+            if not src.startswith('http'):
+                src = 'https://icecream.me' + (src if src.startswith('/') else '/' + src)
+            return make_img_tag(src)
+    except Exception as e:
+        log.warning(f"Icecream error {url}: {e}")
+    return make_link_tag(url, "Screenshot")
+
+
+def transform_bare_url(url: str) -> str:
+    """Обрабатывает голый URL (не из markdown-ссылки)."""
+    url = url.strip()
+
+    if "imgur.com" in url:
+        return resolve_imgur(url)
+
+    if "icecream.me" in url:
+        return resolve_icecream(url)
+
+    if "snipboard.io" in url and "i.snipboard.io" not in url:
+        img_id = url.rstrip('/').split('/')[-1]
+        if img_id:
+            return make_img_tag(f"https://i.snipboard.io/{img_id}.jpg")
+
+    if "monosnap.ai" in url or "take.ms" in url:
+        return resolve_monosnap(url)
+
+    if is_image_url(url):
+        return make_img_tag(url)
+
+    # Обычная ссылка — оставляем как URL (markdown потом не трогает уже HTML),
+    # но лучше сделать кликабельной
+    return make_link_tag(url)
+
+
 def process_image_links(text: str) -> str:
+    """
+    1) Markdown-ссылки [текст](url):
+       - если url — картинка/скриншот-сервис → <img> (или fallback link)
+       - иначе → <a href="url">текст</a>  (сохраняем текст ссылки!)
+    2) Голые URL → картинка или <a>
+    """
     if not text:
         return text
 
-    # Убираем markdown-ссылки
-    text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', text)
+    # --- 1. Markdown links [text](url) ---
+    def replace_md_link(match):
+        link_text = match.group(1)
+        url = match.group(2).strip()
 
-    def transform_url(match):
-        url = match.group(0).strip()
+        # Скриншот-сервисы и прямые картинки — пробуем как image
+        if any(host in url for host in (
+            "imgur.com", "icecream.me", "snipboard.io",
+            "monosnap.ai", "take.ms"
+        )) or is_image_url(url):
+            # Для картинок текст ссылки не важен — вставляем img/fallback
+            return transform_bare_url(url)
 
-        # === Imgur SINGLE + ALBUM (без API) ===
-        if "imgur.com" in url:
-            try:
-                log.info(f"Обрабатываем Imgur: {url}")
+        # Обычная текстовая ссылка — сохраняем якорь
+        return make_link_tag(url, link_text)
 
-                album_match = re.search(r'imgur\.com/(?:a|gallery)/([a-zA-Z0-9]+)', url)
-                images = []
+    text = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', replace_md_link, text)
 
-                if album_match:
-                    album_hash = album_match.group(1)
-                    candidates = [
-                        f"https://i.imgur.com/{album_hash}.jpg",
-                        f"https://i.imgur.com/{album_hash}.png",
-                        f"https://i.imgur.com/{album_hash}_d.jpg",
-                        f"https://i.imgur.com/{album_hash}_1.jpg",
-                        f"https://i.imgur.com/{album_hash}_2.jpg",
-                        f"https://i.imgur.com/{album_hash}_3.jpg",
-                    ]
-                    images.extend(candidates)
+    # --- 2. Bare URLs (которые ещё не внутри href="...") ---
+    def replace_bare_url(match):
+        url = match.group(0)
+        # Не трогаем URL, которые уже внутри HTML-атрибутов
+        return transform_bare_url(url)
 
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
-                    }
-                    r = requests.get(url, timeout=15, headers=headers)
-                    soup = BeautifulSoup(r.text, 'html.parser')
+    # Не матчим URL, которые уже в href="..." или src="..."
+    # Простой подход: заменяем только URL, перед которыми нет =" 
+    text = re.sub(
+        r'(?<![="\'>])(https?://[^\s\)\'\"<>]+)',
+        replace_bare_url,
+        text
+    )
 
-                    for tag in soup.find_all(['img', 'source', 'a']):
-                        for attr in ['src', 'data-src', 'href', 'data-url']:
-                            val = tag.get(attr)
-                            if val and 'i.imgur.com' in val and val not in images:
-                                if not val.startswith('http'):
-                                    val = 'https:' + val if val.startswith('//') else val
-                                images.append(val)
-                else:
-                    single_match = re.search(r'imgur\.com/([a-zA-Z0-9]{5,})', url)
-                    if single_match:
-                        h = single_match.group(1)
-                        images.append(f"https://i.imgur.com/{h}.jpg")
-
-                images = list(dict.fromkeys([u for u in images if u]))
-
-                if images:
-                    html_images = []
-                    for img_url in images[:8]:
-                        html_images.append(
-                            f'<img src="{img_url}" style="max-width:100%; margin:12px 0; display:block;" alt="Screenshot from ClickUp">'
-                        )
-                    log.info(f"✅ Imgur: найдено и вставлено {len(images)} ссылок")
-                    return "".join(html_images)
-
-            except Exception as e:
-                log.warning(f"Imgur error {url}: {e}")
-
-            return url
-
-        # === icecream.me ===
-        if "icecream.me" in url:
-            try:
-                r_head = requests.head(url, timeout=10, allow_redirects=True)
-                final_url = r_head.url
-                if re.search(r'\.(png|jpe?g|gif|webp)', final_url.lower()):
-                    return f'<img src="{final_url}" style="max-width:100%;">'
-
-                r = requests.get(url, timeout=10)
-                soup = BeautifulSoup(r.text, 'html.parser')
-                img_tag = soup.find('img', src=re.compile(r'upload|cdn|images', re.I))
-                if img_tag and img_tag.get('src'):
-                    src = img_tag['src']
-                    if not src.startswith('http'):
-                        src = 'https://icecream.me' + (src if src.startswith('/') else '/' + src)
-                    return f'<img src="{src}" style="max-width:100%;">'
-            except Exception as e:
-                log.warning(f"Icecream error {url}: {e}")
-            return url
-
-        # === snipboard, прямые ссылки, monosnap ===
-        if "snipboard.io" in url and "i.snipboard.io" not in url:
-            img_id = url.split('/')[-1]
-            if img_id:
-                return f'<img src="https://i.snipboard.io/{img_id}.jpg" style="max-width:100%;">'
-
-        if re.search(r'\.(png|jpe?g|gif|webp|bmp)(\?.*)?$', url.lower()):
-            return f'<img src="{url}" style="max-width:100%;">'
-
-        if "monosnap.ai" in url or "take.ms" in url:
-            current_url = url
-            if "take.ms" in url:
-                try:
-                    r_head = requests.head(url, timeout=5, allow_redirects=True)
-                    current_url = r_head.url
-                except Exception:
-                    pass
-            match_id = re.search(r'/(?:file|direct)/([a-zA-Z0-9]+)', current_url)
-            if match_id:
-                img_id = match_id.group(1)
-                api_url = f"https://api.monosnap.ai/file/download?id={img_id}"
-                try:
-                    r = requests.get(api_url, timeout=10, headers={"Referer": current_url})
-                    if r.status_code == 200 and "api.monosnap.ai" not in r.url:
-                        return f'<img src="{r.url}" style="max-width:100%;">'
-                except Exception:
-                    pass
-
-        return url
-
-    text = re.sub(r'https?://[^\s\)\'\"<>]+', transform_url, text)
     return text
 
 
@@ -210,19 +312,16 @@ def parse_timestamp(value):
     if value is None:
         return 0.0
 
-    # Если пришло число (int/float) или числовая строка
     try:
         num = float(value)
     except (TypeError, ValueError):
         num = None
 
     if num is not None:
-        # Миллисекунды обычно > 1e12 (примерно после 2001 года в ms)
         if num > 1e12:
             return num / 1000.0
         return num
 
-    # Пробуем ISO-формат (Intercom иногда так отдаёт)
     if isinstance(value, str):
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -281,14 +380,12 @@ def sync_single_article(art, is_force=True):
         clickup_ts = parse_timestamp(task_data.get("date_updated"))
         intercom_ts = parse_timestamp(art.get("updated_at"))
 
-        # Если задача в ClickUp обновлялась позже, чем статья в Intercom — обновляем
-        if clickup_ts > intercom_ts + 10:  # небольшой буфер 10 сек
+        if clickup_ts > intercom_ts + 10:
             should_update = True
             log.info(
                 f"📅 ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)}) → {name}"
             )
         else:
-            # Fallback: сравнение контента
             title_same = art.get("title") == new_title
             body_same = art.get("body") == new_body
 
@@ -373,18 +470,17 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None):
 # ==============================
 
 def main():
-    # Аргументы: 1-FolderID, 2-IntercomArtIDs, 3-ClickUpTaskID
     target_folder = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else None
     specific_ids = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
     clickup_task_id = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
 
-    # Сценарий 1: Прямое создание/обновление по ID задачи ClickUp (всегда force)
+    # Сценарий 1: по ID задачи ClickUp (всегда force)
     if clickup_task_id:
         log.info(f"--- РЕЖИМ ОДНОЙ ЗАДАЧИ CLICKUP: {clickup_task_id} ---")
         create_or_update_by_clickup_id(clickup_task_id, target_folder)
         return
 
-    # Сценарий 2: Точечное обновление по ID статей Intercom (всегда force)
+    # Сценарий 2: по ID статей Intercom (всегда force)
     if specific_ids:
         ids = [i.strip() for i in specific_ids.split(",")]
         log.info(f"--- РЕЖИМ ТОЧЕЧНОГО ОБНОВЛЕНИЯ INTERCOM: {len(ids)} шт. ---")
@@ -396,8 +492,7 @@ def main():
                 log.error(f"Статья {aid} не найдена в Intercom.")
         return
 
-    # Сценарий 3: Массовая синхронизация по папке
-    # Проверка чётной недели только для автоматического (scheduled) запуска
+    # Сценарий 3: массовая синхронизация
     is_scheduled = os.getenv("IS_SCHEDULED", "").lower() in ("true", "1", "yes")
 
     if is_scheduled and not target_folder:
@@ -407,9 +502,6 @@ def main():
             return
 
     folder_to_scan = target_folder or str(DEFAULT_FOLDER_ID)
-
-    # Полная синхронизация всегда использует умную проверку (date_updated + content)
-    # force=True только в сценариях 1 и 2 выше
     is_force = False
 
     log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) | force={is_force} | scheduled={is_scheduled} ---")
