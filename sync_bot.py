@@ -8,7 +8,7 @@ import requests
 from markdown import markdown
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ==============================
 # КОНФИГУРАЦИЯ
@@ -203,23 +203,44 @@ def find_article_by_task_id(task_id):
 
 
 def parse_timestamp(value):
-    """Преобразует updated_at / date_updated в unix timestamp (секунды)"""
+    """
+    Преобразует updated_at / date_updated в unix timestamp (секунды).
+    ClickUp отдаёт миллисекунды (число или строка), Intercom — секунды или ISO.
+    """
     if value is None:
-        return 0
-    if isinstance(value, (int, float)):
-        # ClickUp отдаёт миллисекунды, Intercom обычно секунды
-        return value / 1000 if value > 1e12 else float(value)
+        return 0.0
+
+    # Если пришло число (int/float) или числовая строка
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        num = None
+
+    if num is not None:
+        # Миллисекунды обычно > 1e12 (примерно после 2001 года в ms)
+        if num > 1e12:
+            return num / 1000.0
+        return num
+
+    # Пробуем ISO-формат (Intercom иногда так отдаёт)
     if isinstance(value, str):
         try:
-            # ISO формат
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
             return dt.timestamp()
         except Exception:
-            try:
-                return float(value)
-            except Exception:
-                return 0
-    return 0
+            pass
+
+    return 0.0
+
+
+def format_ts(ts):
+    """Безопасное форматирование timestamp для логов"""
+    if not ts:
+        return "нет"
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (ValueError, OSError, OverflowError):
+        return f"invalid({ts})"
 
 
 def sync_single_article(art, is_force=True):
@@ -264,8 +285,7 @@ def sync_single_article(art, is_force=True):
         if clickup_ts > intercom_ts + 10:  # небольшой буфер 10 сек
             should_update = True
             log.info(
-                f"📅 ClickUp новее (CU: {datetime.fromtimestamp(clickup_ts).isoformat()} > "
-                f"IC: {datetime.fromtimestamp(intercom_ts).isoformat() if intercom_ts else 'нет'}) → {name}"
+                f"📅 ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)}) → {name}"
             )
         else:
             # Fallback: сравнение контента
