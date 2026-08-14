@@ -358,13 +358,13 @@ def main():
     specific_ids = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
     clickup_task_id = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
 
-    # Сценарий 1: Прямое создание/обновление по ID задачи ClickUp
+    # Сценарий 1: Прямое создание/обновление по ID задачи ClickUp (всегда force)
     if clickup_task_id:
         log.info(f"--- РЕЖИМ ОДНОЙ ЗАДАЧИ CLICKUP: {clickup_task_id} ---")
         create_or_update_by_clickup_id(clickup_task_id, target_folder)
         return
 
-    # Сценарий 2: Точечное обновление по ID статей Intercom
+    # Сценарий 2: Точечное обновление по ID статей Intercom (всегда force)
     if specific_ids:
         ids = [i.strip() for i in specific_ids.split(",")]
         log.info(f"--- РЕЖИМ ТОЧЕЧНОГО ОБНОВЛЕНИЯ INTERCOM: {len(ids)} шт. ---")
@@ -387,8 +387,10 @@ def main():
             return
 
     folder_to_scan = target_folder or str(DEFAULT_FOLDER_ID)
-    # При ручном запуске (даже без folder_id) — force=True, чтобы всегда обновлять
-    is_force = not is_scheduled
+
+    # Полная синхронизация всегда использует умную проверку (date_updated + content)
+    # force=True только в сценариях 1 и 2 выше
+    is_force = False
 
     log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) | force={is_force} | scheduled={is_scheduled} ---")
 
