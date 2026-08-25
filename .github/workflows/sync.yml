@@ -14,7 +14,7 @@ on:
           - migrate_snippet
 
       clickup_task_id:
-        description: 'ID задачи ClickUp (создаст или обновит конкретный гайд)'
+        description: 'ID задач ClickUp (один или несколько через запятую)'
         required: false
         default: ''
 

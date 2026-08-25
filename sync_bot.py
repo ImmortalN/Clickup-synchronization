@@ -465,11 +465,17 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None):
 def main():
     target_folder = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else None
     specific_ids = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2].strip() else None
-    clickup_task_id = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
+    clickup_task_ids_raw = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else None
 
-    if clickup_task_id:
-        log.info(f"--- РЕЖИМ ОДНОЙ ЗАДАЧИ CLICKUP: {clickup_task_id} ---")
-        create_or_update_by_clickup_id(clickup_task_id, target_folder)
+    if clickup_task_ids_raw:
+        task_ids = [tid.strip() for tid in clickup_task_ids_raw.split(",") if tid.strip()]
+        log.info(f"--- РЕЖИМ ЗАДАЧ CLICKUP: {len(task_ids)} шт. → {task_ids} ---")
+        for task_id in task_ids:
+            log.info(f"\n=== Синхронизация задачи {task_id} ===")
+            try:
+                create_or_update_by_clickup_id(task_id, target_folder)
+            except Exception as e:
+                log.error(f"Ошибка при синхронизации {task_id}: {e}")
         return
 
     if specific_ids:
