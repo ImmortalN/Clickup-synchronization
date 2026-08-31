@@ -24,6 +24,21 @@ DEFAULT_FOLDER_ID = 4101985
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
 
+# ClickUp Space (Knowledge Base) — откуда тянем таски
+CLICKUP_SPACE_ID = os.getenv("SPACE_ID") or os.getenv("CLICKUP_SPACE_ID") or ""
+
+# Исключения: эти папки/листы/формы не синхронизируем
+# Папка: https://app.clickup.com/9012497035/v/o/f/90127657005
+# Форма: https://app.clickup.com/9012497035/v/fm/8cjzjmb-34452
+# Лист (ответы): https://app.clickup.com/9012497035/v/l/8cjzjmb-34472
+EXCLUDE_FOLDER_IDS = {
+    "90127657005",
+}
+EXCLUDE_LIST_IDS = {
+    "8cjzjmb-34472",  # лист с ответами
+    "8cjzjmb-34452",  # форма (на случай если API отдаёт как list)
+}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
@@ -238,7 +253,7 @@ def transform_url(url: str, link_text: str = None) -> str:
 def process_image_links(text: str) -> str:
     """
     Правила:
-    1) [текст](url) — обычная ссылка → <a href="url">текст</a>
+    1) [текст](url) — обычная ссылка → <a href=\"url\">текст</a>
     2) [текст](screenshot-url) — пробуем картинку; если нет → <a>текст</a>
     3) голый screenshot-url — пробуем картинку; если нет → <a>url</a>
     4) голый обычный url → <a>url</a>
@@ -259,12 +274,176 @@ def process_image_links(text: str) -> str:
         return transform_url(match.group(0), link_text=None)
 
     text = re.sub(
-        r'(?<![="\'>])(https?://[^\s\)\'\"<>]+)',
+        r'(?<![=\"\'>])(https?://[^\s\)\'\"<>]+)',
         replace_bare_url,
         text
     )
 
     return text
+
+
+def get_folders(space_id):
+    """Все папки в Space (включая subfolders в плоском списке)."""
+    try:
+        r = cu.get(
+            f"https://api.clickup.com/api/v2/space/{space_id}/folder",
+            params={"archived": "false"},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            return r.json().get("folders", [])
+        log.error(f"Ошибка получения folders ({r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        log.error(f"Ошибка get_folders: {e}")
+    return []
+
+
+def get_lists_in_folder(folder_id):
+    """Списки внутри папки."""
+    try:
+        r = cu.get(
+            f"https://api.clickup.com/api/v2/folder/{folder_id}/list",
+            params={"archived": "false"},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            return r.json().get("lists", [])
+        log.error(f"Ошибка lists folder {folder_id} ({r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        log.error(f"Ошибка get_lists_in_folder({folder_id}): {e}")
+    return []
+
+
+def get_folderless_lists(space_id):
+    """Списки на уровне Space (без папки)."""
+    try:
+        r = cu.get(
+            f"https://api.clickup.com/api/v2/space/{space_id}/list",
+            params={"archived": "false"},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            return r.json().get("lists", [])
+        log.error(f"Ошибка folderless lists ({r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        log.error(f"Ошибка get_folderless_lists: {e}")
+    return []
+
+
+def get_tasks_in_list(list_id, include_closed=True):
+    """Все таски списка (с пагинацией). Без сабтасок."""
+    tasks = []
+    page = 0
+    while True:
+        try:
+            r = cu.get(
+                f"https://api.clickup.com/api/v2/list/{list_id}/task",
+                params={
+                    "page": page,
+                    "include_closed": str(include_closed).lower(),
+                    "subtasks": "false",
+                    "include_markdown_description": "true",
+                },
+                timeout=40,
+            )
+            if r.status_code != 200:
+                log.error(f"Ошибка tasks list {list_id} page={page} ({r.status_code}): {r.text[:200]}")
+                break
+            batch = r.json().get("tasks", [])
+            if not batch:
+                break
+            tasks.extend(batch)
+            # ClickUp: до 100 на страницу; last_page флаг или пустая страница
+            if r.json().get("last_page") is True or len(batch) < 100:
+                break
+            page += 1
+            time.sleep(0.25)
+        except Exception as e:
+            log.error(f"Ошибка get_tasks_in_list({list_id}): {e}")
+            break
+    return tasks
+
+
+def collect_list_ids_to_sync(space_id):
+    """
+    Собирает ID всех листов Space, кроме исключённых папок и листов.
+    Документы ClickUp Docs в обход не попадают (это не lists).
+    """
+    list_ids = []
+
+    folders = get_folders(space_id)
+    log.info(f"Найдено папок в Space: {len(folders)}")
+
+    for folder in folders:
+        fid = str(folder.get("id", ""))
+        fname = folder.get("name", "")
+        if fid in EXCLUDE_FOLDER_IDS:
+            log.info(f"⏭ Пропуск папки (exclude): {fname} [{fid}]")
+            continue
+        lists = get_lists_in_folder(fid)
+        for lst in lists:
+            lid = str(lst.get("id", ""))
+            lname = lst.get("name", "")
+            if lid in EXCLUDE_LIST_IDS:
+                log.info(f"⏭ Пропуск листа (exclude): {lname} [{lid}]")
+                continue
+            list_ids.append((lid, lname, fname))
+            log.info(f"  + лист: {fname} / {lname} [{lid}]")
+
+    folderless = get_folderless_lists(space_id)
+    log.info(f"Folderless lists: {len(folderless)}")
+    for lst in folderless:
+        lid = str(lst.get("id", ""))
+        lname = lst.get("name", "")
+        if lid in EXCLUDE_LIST_IDS:
+            log.info(f"⏭ Пропуск folderless листа (exclude): {lname} [{lid}]")
+            continue
+        list_ids.append((lid, lname, "(root)"))
+        log.info(f"  + folderless лист: {lname} [{lid}]")
+
+    return list_ids
+
+
+def sync_from_clickup_space(space_id, intercom_folder_id=None):
+    """
+    Полный обход Space: все листы (кроме exclude) → create_or_update каждой таски.
+    Новые гайды создаются, существующие обновляются.
+    """
+    if not space_id:
+        log.error("SPACE_ID / CLICKUP_SPACE_ID не задан — нечего синхронизировать")
+        return
+
+    target_folder = intercom_folder_id or str(DEFAULT_FOLDER_ID)
+    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ИЗ CLICKUP SPACE {space_id} → Intercom folder {target_folder} ---")
+    log.info(f"Exclude folders: {EXCLUDE_FOLDER_IDS}")
+    log.info(f"Exclude lists: {EXCLUDE_LIST_IDS}")
+
+    lists = collect_list_ids_to_sync(space_id)
+    log.info(f"Всего листов к синхронизации: {len(lists)}")
+
+    created_or_updated = 0
+    errors = 0
+
+    for lid, lname, folder_name in lists:
+        log.info(f"\n=== Лист: {folder_name} / {lname} [{lid}] ===")
+        tasks = get_tasks_in_list(lid)
+        log.info(f"  Тасок: {len(tasks)}")
+        for task in tasks:
+            task_id = task.get("id")
+            if not task_id:
+                continue
+            try:
+                create_or_update_by_clickup_id(task_id, target_folder)
+                created_or_updated += 1
+            except Exception as e:
+                errors += 1
+                log.error(f"Ошибка синхронизации task {task_id}: {e}")
+            time.sleep(0.3)
+
+    log.info(
+        f"--- СИНХРОНИЗАЦИЯ ИЗ CLICKUP ЗАВЕРШЕНА | "
+        f"обработано: {created_or_updated}, ошибок: {errors} ---"
+    )
 
 
 def get_clickup_task(task_id):
@@ -491,47 +670,16 @@ def main():
 
     is_scheduled = os.getenv("IS_SCHEDULED", "").lower() in ("true", "1", "yes")
 
-    if is_scheduled and not target_folder:
+    if is_scheduled:
         week_number = datetime.now().isocalendar()[1]
         if week_number % 2 != 0:
             log.info("Сегодня нечетная неделя. Пропускаем автоматику.")
             return
 
-    folder_to_scan = target_folder or str(DEFAULT_FOLDER_ID)
-    is_force = False
-
-    log.info(f"--- СТАРТ СИНХРОНИЗАЦИИ ПАПКИ (ID: {folder_to_scan}) | force={is_force} | scheduled={is_scheduled} ---")
-
-    updated_count = 0
-    skipped_count = 0
-    page = 1
-
-    while True:
-        r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
-        if r.status_code != 200:
-            log.error(f"Ошибка получения списка статей Intercom: {r.status_code}")
-            break
-
-        data = r.json()
-        articles = data.get("data", [])
-        if not articles:
-            break
-
-        for art in articles:
-            current_folder = str(art.get("parent_id") or art.get("folder_id") or "")
-            if current_folder == folder_to_scan:
-                result = sync_single_article(art, is_force=is_force)
-                if result:
-                    updated_count += 1
-                else:
-                    skipped_count += 1
-
-        if page >= data.get("pages", {}).get("total_pages", 1):
-            break
-        page += 1
-        time.sleep(0.5)
-
-    log.info(f"--- СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА | обновлено: {updated_count}, пропущено: {skipped_count} ---")
+    # Режим по умолчанию: обход ClickUp Space → create/update гайдов в Intercom
+    # target_folder (argv[1]) — ID папки Intercom, куда класть новые статьи
+    intercom_folder = target_folder or str(DEFAULT_FOLDER_ID)
+    sync_from_clickup_space(CLICKUP_SPACE_ID, intercom_folder_id=intercom_folder)
 
 
 if __name__ == "__main__":
