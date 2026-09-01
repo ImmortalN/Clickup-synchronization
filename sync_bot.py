@@ -421,8 +421,7 @@ def sync_from_clickup_space(space_id, intercom_folder_id=None):
     lists = collect_list_ids_to_sync(space_id)
     log.info(f"Всего листов к синхронизации: {len(lists)}")
 
-    created_or_updated = 0
-    errors = 0
+    stats = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
 
     for lid, lname, folder_name in lists:
         log.info(f"\n=== Лист: {folder_name} / {lname} [{lid}] ===")
@@ -433,16 +432,17 @@ def sync_from_clickup_space(space_id, intercom_folder_id=None):
             if not task_id:
                 continue
             try:
-                create_or_update_by_clickup_id(task_id, target_folder)
-                created_or_updated += 1
+                result = create_or_update_by_clickup_id(task_id, target_folder)
+                stats[result if result in stats else "error"] += 1
             except Exception as e:
-                errors += 1
+                stats["error"] += 1
                 log.error(f"Ошибка синхронизации task {task_id}: {e}")
             time.sleep(0.3)
 
     log.info(
         f"--- СИНХРОНИЗАЦИЯ ИЗ CLICKUP ЗАВЕРШЕНА | "
-        f"обработано: {created_or_updated}, ошибок: {errors} ---"
+        f"создано: {stats['created']}, обновлено: {stats['updated']}, "
+        f"пропущено: {stats['skipped']}, ошибок: {stats['error']} ---"
     )
 
 
@@ -602,11 +602,17 @@ def sync_single_article(art, is_force=True):
     return False
 
 
-def create_or_update_by_clickup_id(task_id, target_folder_id=None):
+def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
+    """
+    - нет статьи → создать
+    - есть, ClickUp не новее Intercom → пропустить (skipped)
+    - есть, ClickUp новее (или force) → обновить
+    Возвращает: "created" | "updated" | "skipped" | "error"
+    """
     task_data = get_clickup_task(task_id)
     if not task_data or task_data == "DELETED":
         log.error(f"❌ Ошибка: Задача ClickUp {task_id} не найдена.")
-        return
+        return "error"
 
     name = task_data.get("name") or ""
     desc = task_data.get("markdown_description") or task_data.get("description") or ""
@@ -625,20 +631,35 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None):
 
     existing_art = find_article_by_task_id(task_id)
 
-    if existing_art:
-        log.info(f"🔄 Обновление статьи {existing_art['id']}: {new_title}")
-        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload, timeout=30)
-        if r.status_code in (200, 201):
-            log.info("✅ Успешно обновлено")
-        else:
-            log.error(f"❌ Ошибка API ({r.status_code}): {r.text[:300]}")
-    else:
+    if not existing_art:
         log.info(f"✨ Создание новой статьи: {new_title}")
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
         if r.status_code in (200, 201):
             log.info(f"✅ Успешно создано. ID: {r.json().get('id')}")
-        else:
-            log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
+            return "created"
+        log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
+        return "error"
+
+    clickup_ts = parse_timestamp(task_data.get("date_updated"))
+    intercom_ts = parse_timestamp(existing_art.get("updated_at"))
+
+    if not force and clickup_ts <= intercom_ts + 10:
+        log.info(
+            f"⏭ Пропущено (актуально): {name} | "
+            f"CU: {format_ts(clickup_ts)} ≤ IC: {format_ts(intercom_ts)}"
+        )
+        return "skipped"
+
+    reason = "force" if force else (
+        f"ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)})"
+    )
+    log.info(f"🔄 Обновление статьи {existing_art['id']}: {new_title} | причина: {reason}")
+    r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload, timeout=30)
+    if r.status_code in (200, 201):
+        log.info("✅ Успешно обновлено")
+        return "updated"
+    log.error(f"❌ Ошибка API ({r.status_code}): {r.text[:300]}")
+    return "error"
 
 
 def main():
@@ -648,13 +669,21 @@ def main():
 
     if clickup_task_ids_raw:
         task_ids = [tid.strip() for tid in clickup_task_ids_raw.split(",") if tid.strip()]
-        log.info(f"--- РЕЖИМ ЗАДАЧ CLICKUP: {len(task_ids)} шт. → {task_ids} ---")
+        force = os.getenv("FORCE_UPDATE", "").lower() in ("true", "1", "yes")
+        log.info(f"--- РЕЖИМ ЗАДАЧ CLICKUP: {len(task_ids)} шт. | force={force} → {task_ids} ---")
+        stats = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
         for task_id in task_ids:
             log.info(f"\n=== Синхронизация задачи {task_id} ===")
             try:
-                create_or_update_by_clickup_id(task_id, target_folder)
+                result = create_or_update_by_clickup_id(task_id, target_folder, force=force)
+                stats[result if result in stats else "error"] += 1
             except Exception as e:
+                stats["error"] += 1
                 log.error(f"Ошибка при синхронизации {task_id}: {e}")
+        log.info(
+            f"--- ИТОГО | создано: {stats['created']}, обновлено: {stats['updated']}, "
+            f"пропущено: {stats['skipped']}, ошибок: {stats['error']} ---"
+        )
         return
 
     if specific_ids:
