@@ -10,33 +10,23 @@ on:
         type: choice
         options:
           - sync
-          - sync_smart
           - delete_guides
           - migrate_snippet
 
       clickup_task_id:
-        description: 'ID задач ClickUp (через запятую). Для sync_smart — обязательно'
+        description: 'ID задач ClickUp (один или несколько через запятую)'
         required: false
         default: ''
 
       folder_id:
-        description: 'ID папки Intercom'
+        description: 'ID папки (для sync_bot.py)'
         required: false
         default: ''
 
       article_ids:
-        description: 'ID статей Intercom (только script=sync)'
+        description: 'ID статей через запятую (для sync_bot.py)'
         required: false
         default: ''
-
-      force_update:
-        description: 'FORCE_UPDATE для sync_smart'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
 
   schedule:
     - cron: '0 0 * * 6'
@@ -57,6 +47,9 @@ jobs:
       - name: Install dependencies
         run: pip install requests markdown python-dotenv beautifulsoup4 lxml
 
+      # ==============================
+      # SYNC BOT
+      # ==============================
       - name: Run sync bot
         if: github.event.inputs.script == 'sync' || github.event_name == 'schedule'
         env:
@@ -72,21 +65,9 @@ jobs:
             "${{ github.event.inputs.clickup_task_id }}" \
             2>&1 | tee sync.log
 
-      - name: Run sync SMART (skip up-to-date)
-        if: github.event.inputs.script == 'sync_smart'
-        env:
-          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
-          INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
-          INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
-          INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
-          FORCE_UPDATE: ${{ github.event.inputs.force_update }}
-        run: |
-          python test_skip_sync.py \
-            "${{ github.event.inputs.folder_id }}" \
-            "" \
-            "${{ github.event.inputs.clickup_task_id }}" \
-            2>&1 | tee sync.log
-
+      # ==============================
+      # DELETE INTERNAL GUIDES
+      # ==============================
       - name: Delete internal guides
         if: github.event.inputs.script == 'delete_guides'
         env:
@@ -94,6 +75,9 @@ jobs:
         run: |
           python delete_internal_guides.py 2>&1 | tee sync.log
 
+      # ==============================
+      # MIGRATE SNIPPET
+      # ==============================
       - name: Migrate snippet to guide
         if: github.event.inputs.script == 'migrate_snippet'
         env:
@@ -103,6 +87,9 @@ jobs:
         run: |
           python migrate_snippet_to_guide.py 2>&1 | tee sync.log
 
+      # ==============================
+      # SEND EMAIL
+      # ==============================
       - name: Send mail
         if: always()
         uses: dawidd6/action-send-mail@v18
