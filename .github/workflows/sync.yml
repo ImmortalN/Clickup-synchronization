@@ -51,6 +51,7 @@ jobs:
       # SYNC BOT
       # ==============================
       - name: Run sync bot
+        id: sync
         if: github.event.inputs.script == 'sync' || github.event_name == 'schedule'
         env:
           CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
@@ -87,11 +88,26 @@ jobs:
         run: |
           python migrate_snippet_to_guide.py 2>&1 | tee sync.log
 
+      # Определяем: пропуск из-за нечётной недели (письмо не нужно)
+      - name: Detect week skip
+        id: week_skip
+        if: always() && github.event_name == 'schedule'
+        run: |
+          if [ -f sync.log ] && grep -q "нечетная неделя" sync.log; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "Odd week — email will be skipped"
+          else
+            echo "skipped=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # ==============================
-      # SEND EMAIL
+      # SEND EMAIL — только автозапуск, и только если синк реально шёл
       # ==============================
       - name: Send mail
-        if: always()
+        if: >-
+          always() &&
+          github.event_name == 'schedule' &&
+          steps.week_skip.outputs.skipped != 'true'
         uses: dawidd6/action-send-mail@v18
         with:
           server_address: smtp.gmail.com
@@ -102,8 +118,7 @@ jobs:
           to: immortal@jetmonsters.me
           from: GitHub Actions Sync <${{ secrets.MAIL_USERNAME }}>
           body: |
-            Выполнение завершено.
-            Сценарий: ${{ github.event.inputs.script || 'Scheduled Sync' }}
+            Автоматическая синхронизация завершена.
             Статус: ${{ job.status }}
 
             Логи во вложении.
