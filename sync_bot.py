@@ -615,11 +615,30 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
         return "error"
 
     name = task_data.get("name") or ""
-    desc = task_data.get("markdown_description") or task_data.get("description") or ""
     new_title = f"{name} [{task_id}]"[:255]
+    folder_id = int(target_folder_id) if target_folder_id and str(target_folder_id).isdigit() else DEFAULT_FOLDER_ID
+
+    existing_art = find_article_by_task_id(task_id)
+
+    # --- Сначала решаем, нужно ли вообще трогать body (и картинки) ---
+    clickup_ts = None
+    intercom_ts = None
+
+    if existing_art and not force:
+        clickup_ts = parse_timestamp(task_data.get("date_updated"))
+        intercom_ts = parse_timestamp(existing_art.get("updated_at"))
+
+        if clickup_ts <= intercom_ts + 10:
+            log.info(
+                f"⏭ Пропущено (актуально): {name} | "
+                f"CU: {format_ts(clickup_ts)} ≤ IC: {format_ts(intercom_ts)}"
+            )
+            return "skipped"
+
+    # --- Только если реально будем создавать или обновлять — обрабатываем картинки ---
+    desc = task_data.get("markdown_description") or task_data.get("description") or ""
     body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
     new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
-    folder_id = int(target_folder_id) if target_folder_id and str(target_folder_id).isdigit() else DEFAULT_FOLDER_ID
 
     payload = {
         "title": new_title,
@@ -628,8 +647,6 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
         "author_id": INTERCOM_AUTHOR_ID,
         "folder_id": folder_id
     }
-
-    existing_art = find_article_by_task_id(task_id)
 
     if not existing_art:
         log.info(f"✨ Создание новой статьи: {new_title}")
@@ -640,16 +657,7 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
         log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
         return "error"
 
-    clickup_ts = parse_timestamp(task_data.get("date_updated"))
-    intercom_ts = parse_timestamp(existing_art.get("updated_at"))
-
-    if not force and clickup_ts <= intercom_ts + 10:
-        log.info(
-            f"⏭ Пропущено (актуально): {name} | "
-            f"CU: {format_ts(clickup_ts)} ≤ IC: {format_ts(intercom_ts)}"
-        )
-        return "skipped"
-
+    # existing_art есть и мы дошли сюда → нужно обновлять
     reason = "force" if force else (
         f"ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)})"
     )
@@ -660,6 +668,7 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
         return "updated"
     log.error(f"❌ Ошибка API ({r.status_code}): {r.text[:300]}")
     return "error"
+
 
 
 def main():
@@ -713,3 +722,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
