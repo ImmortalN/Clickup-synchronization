@@ -617,11 +617,7 @@ def sync_single_article(art, is_force=True):
         return False
 
     name = task_data.get("name") or ""
-    desc = task_data.get("markdown_description") or task_data.get("description") or ""
-
     new_title = f"{name} [{task_id}]"[:255]
-    body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
-    new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
 
     should_update = is_force
 
@@ -635,22 +631,16 @@ def sync_single_article(art, is_force=True):
                 f"📅 ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)}) → {name}"
             )
         else:
-            title_same = art.get("title") == new_title
-            body_same = art.get("body") == new_body
-
-            if title_same and body_same:
-                log.info(f"⏭ Пропущено (дата и контент без изменений): {name}")
-                return False
-            else:
-                should_update = True
-                reason = []
-                if not title_same:
-                    reason.append("title")
-                if not body_same:
-                    reason.append("body")
-                log.info(f"📝 Контент отличается ({', '.join(reason)}) → обновляем: {name}")
+            # Быстрый skip по дате — без обработки картинок и сравнения body
+            log.info(f"⏭ Пропущено (актуально): {name}")
+            return False
 
     if should_update:
+        # Картинки обрабатываем только когда реально обновляем
+        desc = task_data.get("markdown_description") or task_data.get("description") or ""
+        body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
+        new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
+
         log.info(f"🔄 Обновление: {name}")
         payload = {
             "title": new_title,
@@ -689,6 +679,9 @@ def create_or_update_by_clickup_id(
 
     task_data — если уже есть данные таски (из списка), повторный запрос не делаем.
     intercom_cache — словарь {task_id: article} для быстрого поиска.
+
+    Важно: process_image_links вызывается ТОЛЬКО когда реально нужно create/update.
+    При skip картинки не трогаем.
     """
     # Берём данные таски: либо переданные, либо запрашиваем
     if task_data is None:
@@ -699,57 +692,70 @@ def create_or_update_by_clickup_id(
         return "error"
 
     name = task_data.get("name") or ""
-    desc = task_data.get("markdown_description") or task_data.get("description") or ""
     new_title = f"{name} [{task_id}]"[:255]
+    folder_id = int(target_folder_id) if target_folder_id and str(target_folder_id).isdigit() else DEFAULT_FOLDER_ID
+
+    existing_art = find_article_by_task_id(task_id, intercom_cache=intercom_cache)
+
+    # --- Статья уже есть: сначала решаем, нужно ли вообще что-то делать ---
+    if existing_art:
+        clickup_ts = parse_timestamp(task_data.get("date_updated"))
+        intercom_ts = parse_timestamp(existing_art.get("updated_at"))
+
+        if not force and clickup_ts <= intercom_ts + 10:
+            log.info(
+                f"⏭ Пропущено (актуально): {name} | "
+                f"CU: {format_ts(clickup_ts)} ≤ IC: {format_ts(intercom_ts)}"
+            )
+            return "skipped"
+
+        reason = "force" if force else (
+            f"ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)})"
+        )
+        log.info(f"🔄 Обновление статьи {existing_art['id']}: {new_title} | причина: {reason}")
+
+        # Картинки обрабатываем только здесь (перед реальным update)
+        desc = task_data.get("markdown_description") or task_data.get("description") or ""
+        body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
+        new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
+
+        payload = {
+            "title": new_title,
+            "body": new_body[:100000],
+            "owner_id": INTERCOM_OWNER_ID,
+            "author_id": INTERCOM_AUTHOR_ID,
+            "folder_id": folder_id,
+        }
+        r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload, timeout=30)
+        if r.status_code in (200, 201):
+            log.info("✅ Успешно обновлено")
+            if intercom_cache is not None:
+                intercom_cache[task_id] = r.json() if r.content else existing_art
+            return "updated"
+        log.error(f"❌ Ошибка API ({r.status_code}): {r.text[:300]}")
+        return "error"
+
+    # --- Статьи нет → создаём (картинки обрабатываем только здесь) ---
+    log.info(f"✨ Создание новой статьи: {new_title}")
+    desc = task_data.get("markdown_description") or task_data.get("description") or ""
     body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
     new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
-    folder_id = int(target_folder_id) if target_folder_id and str(target_folder_id).isdigit() else DEFAULT_FOLDER_ID
 
     payload = {
         "title": new_title,
         "body": new_body[:100000],
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
-        "folder_id": folder_id
+        "folder_id": folder_id,
     }
-
-    existing_art = find_article_by_task_id(task_id, intercom_cache=intercom_cache)
-
-    if not existing_art:
-        log.info(f"✨ Создание новой статьи: {new_title}")
-        r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
-        if r.status_code in (200, 201):
-            new_id = r.json().get("id")
-            log.info(f"✅ Успешно создано. ID: {new_id}")
-            # Обновляем кэш, чтобы не создавать дубликаты в рамках одного запуска
-            if intercom_cache is not None and new_id:
-                intercom_cache[task_id] = r.json()
-            return "created"
-        log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
-        return "error"
-
-    clickup_ts = parse_timestamp(task_data.get("date_updated"))
-    intercom_ts = parse_timestamp(existing_art.get("updated_at"))
-
-    if not force and clickup_ts <= intercom_ts + 10:
-        log.info(
-            f"⏭ Пропущено (актуально): {name} | "
-            f"CU: {format_ts(clickup_ts)} ≤ IC: {format_ts(intercom_ts)}"
-        )
-        return "skipped"
-
-    reason = "force" if force else (
-        f"ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)})"
-    )
-    log.info(f"🔄 Обновление статьи {existing_art['id']}: {new_title} | причина: {reason}")
-    r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload, timeout=30)
+    r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
     if r.status_code in (200, 201):
-        log.info("✅ Успешно обновлено")
-        # Обновляем кэш
-        if intercom_cache is not None:
-            intercom_cache[task_id] = r.json() if r.content else existing_art
-        return "updated"
-    log.error(f"❌ Ошибка API ({r.status_code}): {r.text[:300]}")
+        new_id = r.json().get("id")
+        log.info(f"✅ Успешно создано. ID: {new_id}")
+        if intercom_cache is not None and new_id:
+            intercom_cache[task_id] = r.json()
+        return "created"
+    log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
     return "error"
 
 
