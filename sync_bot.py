@@ -29,14 +29,16 @@ CLICKUP_SPACE_ID = os.getenv("SPACE_ID") or os.getenv("CLICKUP_SPACE_ID") or ""
 
 # Исключения: эти папки/листы/формы не синхронизируем
 # Папка: https://app.clickup.com/9012497035/v/o/f/90127657005
-# Форма: https://app.clickup.com/9012497035/v/fm/8cjzjmb-34452
-# Лист (ответы): https://app.clickup.com/9012497035/v/l/8cjzjmb-34472
+# Форма (URL): https://app.clickup.com/9012497035/v/li/901212791461
+# Форма (старый/кастомный id): https://app.clickup.com/9012497035/v/fm/8cjzjmb-34452
+# Лист с ответами: https://app.clickup.com/9012497035/v/l/8cjzjmb-34472
 EXCLUDE_FOLDER_IDS = {
     "90127657005",
 }
 EXCLUDE_LIST_IDS = {
-    "8cjzjmb-34472",  # лист с ответами
-    "8cjzjmb-34452",  # форма (на случай если API отдаёт как list)
+    "8cjzjmb-34472",     # лист с ответами по форме
+    "901212791461",      # сама форма (числовой id из /v/li/...)
+    "8cjzjmb-34452",     # форма (кастомный/старый id, на всякий случай)
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
