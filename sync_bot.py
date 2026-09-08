@@ -62,6 +62,9 @@ SCREENSHOT_HOSTS = (
     "monosnap.ai", "take.ms",
 )
 
+# Кэш резолва картинок на время одного запуска (безопасно, не сохраняется)
+_image_url_cache = {}
+
 # ==============================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==============================
@@ -228,26 +231,31 @@ def transform_url(url: str, link_text: str = None) -> str:
     """
     url = url.strip()
 
+    # Кэш: одинаковые URL не резолвим повторно в рамках одного запуска
+    cache_key = (url, link_text)
+    if cache_key in _image_url_cache:
+        return _image_url_cache[cache_key]
+
     if "imgur.com" in url:
-        return resolve_imgur(url, link_text)
-
-    if "icecream.me" in url:
-        return resolve_icecream(url, link_text)
-
-    if "snipboard.io" in url and "i.snipboard.io" not in url:
+        result = resolve_imgur(url, link_text)
+    elif "icecream.me" in url:
+        result = resolve_icecream(url, link_text)
+    elif "snipboard.io" in url and "i.snipboard.io" not in url:
         img_id = url.rstrip('/').split('/')[-1]
         if img_id:
-            return make_img_tag(f"https://i.snipboard.io/{img_id}.jpg")
-        return fallback_link(url, link_text)
+            result = make_img_tag(f"https://i.snipboard.io/{img_id}.jpg")
+        else:
+            result = fallback_link(url, link_text)
+    elif "monosnap.ai" in url or "take.ms" in url:
+        result = resolve_monosnap(url, link_text)
+    elif is_image_url(url):
+        result = make_img_tag(url)
+    else:
+        # Обычная ссылка (не скриншот)
+        result = fallback_link(url, link_text)
 
-    if "monosnap.ai" in url or "take.ms" in url:
-        return resolve_monosnap(url, link_text)
-
-    if is_image_url(url):
-        return make_img_tag(url)
-
-    # Обычная ссылка (не скриншот)
-    return fallback_link(url, link_text)
+    _image_url_cache[cache_key] = result
+    return result
 
 
 def process_image_links(text: str) -> str:
@@ -357,7 +365,7 @@ def get_tasks_in_list(list_id, include_closed=True):
             if r.json().get("last_page") is True or len(batch) < 100:
                 break
             page += 1
-            time.sleep(0.25)
+            time.sleep(0.2)
         except Exception as e:
             log.error(f"Ошибка get_tasks_in_list({list_id}): {e}")
             break
@@ -404,6 +412,44 @@ def collect_list_ids_to_sync(space_id):
     return list_ids
 
 
+def load_all_intercom_articles():
+    """
+    Один раз загружаем ВСЕ internal articles в словарь {task_id: article}.
+    Это главная оптимизация: вместо поиска по всем страницам для каждой таски.
+    """
+    cache = {}
+    page = 1
+    while True:
+        try:
+            r = ic.get(
+                f"{INTERCOM_BASE}/internal_articles",
+                params={"page": page, "per_page": 50},
+                timeout=30,
+            )
+            if r.status_code != 200:
+                log.error(f"Ошибка загрузки Intercom articles page={page} ({r.status_code}): {r.text[:200]}")
+                break
+            data = r.json()
+            articles = data.get("data", [])
+            if not articles:
+                break
+            for art in articles:
+                title = art.get("title", "")
+                m = re.search(r'\[([a-zA-Z0-9]+)\]$', title)
+                if m:
+                    cache[m.group(1)] = art
+            total_pages = data.get("pages", {}).get("total_pages", 1)
+            if page >= total_pages:
+                break
+            page += 1
+            time.sleep(0.15)
+        except Exception as e:
+            log.error(f"Ошибка load_all_intercom_articles page={page}: {e}")
+            break
+    log.info(f"Загружено статей Intercom в кэш: {len(cache)}")
+    return cache
+
+
 def sync_from_clickup_space(space_id, intercom_folder_id=None):
     """
     Полный обход Space: все листы (кроме exclude) → create_or_update каждой таски.
@@ -418,10 +464,14 @@ def sync_from_clickup_space(space_id, intercom_folder_id=None):
     log.info(f"Exclude folders: {EXCLUDE_FOLDER_IDS}")
     log.info(f"Exclude lists: {EXCLUDE_LIST_IDS}")
 
+    # Главная оптимизация: один раз загружаем все статьи Intercom
+    intercom_cache = load_all_intercom_articles()
+
     lists = collect_list_ids_to_sync(space_id)
     log.info(f"Всего листов к синхронизации: {len(lists)}")
 
     stats = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
+    total_processed = 0
 
     for lid, lname, folder_name in lists:
         log.info(f"\n=== Лист: {folder_name} / {lname} [{lid}] ===")
@@ -432,12 +482,26 @@ def sync_from_clickup_space(space_id, intercom_folder_id=None):
             if not task_id:
                 continue
             try:
-                result = create_or_update_by_clickup_id(task_id, target_folder)
+                # Передаём уже готовые данные таски + кэш Intercom
+                result = create_or_update_by_clickup_id(
+                    task_id,
+                    target_folder,
+                    force=False,
+                    task_data=task,
+                    intercom_cache=intercom_cache,
+                )
                 stats[result if result in stats else "error"] += 1
             except Exception as e:
                 stats["error"] += 1
                 log.error(f"Ошибка синхронизации task {task_id}: {e}")
-            time.sleep(0.3)
+            total_processed += 1
+            if total_processed % 100 == 0:
+                log.info(
+                    f"  … прогресс: {total_processed} тасков | "
+                    f"created={stats['created']} updated={stats['updated']} "
+                    f"skipped={stats['skipped']} error={stats['error']}"
+                )
+            time.sleep(0.2)
 
     log.info(
         f"--- СИНХРОНИЗАЦИЯ ИЗ CLICKUP ЗАВЕРШЕНА | "
@@ -464,7 +528,15 @@ def get_clickup_task(task_id):
     return None
 
 
-def find_article_by_task_id(task_id):
+def find_article_by_task_id(task_id, intercom_cache=None):
+    """
+    Ищем статью по task_id.
+    Если передан кэш — используем его (быстро).
+    Иначе — старый медленный поиск по страницам (для точечных режимов).
+    """
+    if intercom_cache is not None:
+        return intercom_cache.get(task_id)
+
     page = 1
     while True:
         r = ic.get(f"{INTERCOM_BASE}/internal_articles", params={"page": page, "per_page": 50})
@@ -482,7 +554,7 @@ def find_article_by_task_id(task_id):
         if page >= data.get("pages", {}).get("total_pages", 1):
             break
         page += 1
-        time.sleep(0.3)
+        time.sleep(0.2)
     return None
 
 
@@ -602,43 +674,36 @@ def sync_single_article(art, is_force=True):
     return False
 
 
-def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
+def create_or_update_by_clickup_id(
+    task_id,
+    target_folder_id=None,
+    force=False,
+    task_data=None,
+    intercom_cache=None,
+):
     """
     - нет статьи → создать
     - есть, ClickUp не новее Intercom → пропустить (skipped)
     - есть, ClickUp новее (или force) → обновить
     Возвращает: "created" | "updated" | "skipped" | "error"
+
+    task_data — если уже есть данные таски (из списка), повторный запрос не делаем.
+    intercom_cache — словарь {task_id: article} для быстрого поиска.
     """
-    task_data = get_clickup_task(task_id)
+    # Берём данные таски: либо переданные, либо запрашиваем
+    if task_data is None:
+        task_data = get_clickup_task(task_id)
+
     if not task_data or task_data == "DELETED":
         log.error(f"❌ Ошибка: Задача ClickUp {task_id} не найдена.")
         return "error"
 
     name = task_data.get("name") or ""
-    new_title = f"{name} [{task_id}]"[:255]
-    folder_id = int(target_folder_id) if target_folder_id and str(target_folder_id).isdigit() else DEFAULT_FOLDER_ID
-
-    existing_art = find_article_by_task_id(task_id)
-
-    # --- Сначала решаем, нужно ли вообще трогать body (и картинки) ---
-    clickup_ts = None
-    intercom_ts = None
-
-    if existing_art and not force:
-        clickup_ts = parse_timestamp(task_data.get("date_updated"))
-        intercom_ts = parse_timestamp(existing_art.get("updated_at"))
-
-        if clickup_ts <= intercom_ts + 10:
-            log.info(
-                f"⏭ Пропущено (актуально): {name} | "
-                f"CU: {format_ts(clickup_ts)} ≤ IC: {format_ts(intercom_ts)}"
-            )
-            return "skipped"
-
-    # --- Только если реально будем создавать или обновлять — обрабатываем картинки ---
     desc = task_data.get("markdown_description") or task_data.get("description") or ""
+    new_title = f"{name} [{task_id}]"[:255]
     body_content = markdown(process_image_links(desc), extensions=['fenced_code', 'nl2br', 'tables'])
     new_body = f"<h1>{html.escape(name)}</h1>{body_content}"
+    folder_id = int(target_folder_id) if target_folder_id and str(target_folder_id).isdigit() else DEFAULT_FOLDER_ID
 
     payload = {
         "title": new_title,
@@ -648,16 +713,31 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
         "folder_id": folder_id
     }
 
+    existing_art = find_article_by_task_id(task_id, intercom_cache=intercom_cache)
+
     if not existing_art:
         log.info(f"✨ Создание новой статьи: {new_title}")
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
         if r.status_code in (200, 201):
-            log.info(f"✅ Успешно создано. ID: {r.json().get('id')}")
+            new_id = r.json().get("id")
+            log.info(f"✅ Успешно создано. ID: {new_id}")
+            # Обновляем кэш, чтобы не создавать дубликаты в рамках одного запуска
+            if intercom_cache is not None and new_id:
+                intercom_cache[task_id] = r.json()
             return "created"
         log.error(f"❌ Ошибка при создании ({r.status_code}): {r.text[:300]}")
         return "error"
 
-    # existing_art есть и мы дошли сюда → нужно обновлять
+    clickup_ts = parse_timestamp(task_data.get("date_updated"))
+    intercom_ts = parse_timestamp(existing_art.get("updated_at"))
+
+    if not force and clickup_ts <= intercom_ts + 10:
+        log.info(
+            f"⏭ Пропущено (актуально): {name} | "
+            f"CU: {format_ts(clickup_ts)} ≤ IC: {format_ts(intercom_ts)}"
+        )
+        return "skipped"
+
     reason = "force" if force else (
         f"ClickUp новее (CU: {format_ts(clickup_ts)} > IC: {format_ts(intercom_ts)})"
     )
@@ -665,10 +745,12 @@ def create_or_update_by_clickup_id(task_id, target_folder_id=None, force=False):
     r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload, timeout=30)
     if r.status_code in (200, 201):
         log.info("✅ Успешно обновлено")
+        # Обновляем кэш
+        if intercom_cache is not None:
+            intercom_cache[task_id] = r.json() if r.content else existing_art
         return "updated"
     log.error(f"❌ Ошибка API ({r.status_code}): {r.text[:300]}")
     return "error"
-
 
 
 def main():
@@ -722,5 +804,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
