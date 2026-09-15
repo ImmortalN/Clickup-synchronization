@@ -12,6 +12,7 @@ on:
           - sync
           - delete_guides
           - migrate_snippet
+          - github_wiki
 
       clickup_task_id:
         description: 'ID задач ClickUp (один или несколько через запятую)'
