@@ -4,11 +4,12 @@ GitHub Dev Docs → Intercom Internal Guides (единый скрипт)
 
 Источники:
   1. Wiki JetFormBuilder (фиксированный список страниц)
-  2. Все .md из Crocoblock/developer-documentation
+  2. Все полезные .md из Crocoblock/developer-documentation
 
-Оптимизация:
-  - сравниваем Last-Modified источника с updated_at статьи в Intercom
-  - если источник не новее → skip (не тратим время на update)
+Оптимизации:
+  - сравнение Last-Modified источника с updated_at Intercom → skip если актуально
+  - пропуск README и коротких оглавлений (только ссылки)
+  - ai_chatbot_availability = True (тоггл Service)
 """
 
 import os
@@ -52,11 +53,14 @@ DEVDOCS_OWNER = "Crocoblock"
 DEVDOCS_REPO = "developer-documentation"
 DEVDOCS_BRANCH = "main"
 
-# [] = все файлы; можно ограничить, например: ["03-jet-form-builder"]
+# [] = все файлы; можно ограничить, например: ["03-jet-form-builder", "01-jet-engine"]
 DEVDOCS_INCLUDE_PREFIXES = []
 
 # Буфер в секундах: источник должен быть новее минимум на столько
 DATE_BUFFER_SECONDS = 30
+
+# Минимальная длина полезного текста (после очистки от ссылок/заголовков)
+MIN_USEFUL_TEXT_LEN = 120
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -74,12 +78,11 @@ ic.headers.update({
 # ==============================
 
 def parse_intercom_ts(value) -> float:
-    """updated_at из Intercom → unix timestamp."""
     if value is None:
         return 0.0
     try:
         num = float(value)
-        if num > 1e12:  # миллисекунды
+        if num > 1e12:
             return num / 1000.0
         return num
     except (TypeError, ValueError):
@@ -94,7 +97,6 @@ def parse_intercom_ts(value) -> float:
 
 
 def parse_last_modified(header_value: str | None) -> float:
-    """HTTP Last-Modified → unix timestamp."""
     if not header_value:
         return 0.0
     try:
@@ -116,11 +118,37 @@ def format_ts(ts: float) -> str:
 
 
 def is_source_newer(source_ts: float, intercom_ts: float) -> bool:
-    """Источник новее Intercom (с небольшим буфером)."""
     if not source_ts:
-        # даты источника нет — лучше обновить
-        return True
+        return True  # даты нет — лучше обновить
     return source_ts > intercom_ts + DATE_BUFFER_SECONDS
+
+
+# ==============================
+# ФИЛЬТР README / ОГЛАВЛЕНИЙ
+# ==============================
+
+def is_index_or_readme(path: str, content: str) -> bool:
+    """
+    True = файл не нужен (README или почти пустое оглавление со ссылками).
+    """
+    name = path.split("/")[-1].lower()
+
+    # 1. Все README
+    if name in ("readme.md", "readme.markdown", "readme"):
+        return True
+
+    # 2. Очень короткие файлы (скорее всего только ссылки)
+    text = re.sub(r"\[.*?\]\(.*?\)", "", content)   # [text](url)
+    text = re.sub(r"!\[.*?\]\(.*?\)", "", text)      # картинки
+    text = re.sub(r"#+\s*", "", text)               # заголовки
+    text = re.sub(r"[-*+]\s*", "", text)            # маркеры списков
+    text = re.sub(r"`{1,3}.*?`{1,3}", "", text, flags=re.DOTALL)  # код
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if len(text) < MIN_USEFUL_TEXT_LEN:
+        return True
+
+    return False
 
 
 # ==============================
@@ -177,10 +205,7 @@ def create_or_update(
     source_ts: float = 0.0,
     existing: dict | None = None,
 ) -> str:
-    """
-    create / update / skipped
-    existing — если уже нашли статью снаружи (чтобы не искать дважды)
-    """
+    """create / update / skipped / error"""
     if existing is None:
         existing = find_article_by_id(article_id)
 
@@ -203,7 +228,7 @@ def create_or_update(
         "body": new_body,
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
-        "ai_chatbot_availability": True,
+        "ai_chatbot_availability": True,  # Service / Fin
     }
 
     if existing:
@@ -237,7 +262,6 @@ def create_or_update(
 # ==============================
 
 def fetch_wiki(slug: str) -> tuple[str | None, float]:
-    """Возвращает (markdown, source_timestamp)."""
     url = f"https://raw.githubusercontent.com/wiki/Crocoblock/jetformbuilder/{slug}.md"
     try:
         r = requests.get(url, timeout=20)
@@ -274,7 +298,6 @@ def get_devdocs_tree() -> list[dict]:
 
 
 def fetch_devdocs_file(path: str) -> tuple[str | None, float]:
-    """Возвращает (markdown, source_timestamp) по Last-Modified."""
     url = (
         f"https://raw.githubusercontent.com/{DEVDOCS_OWNER}/{DEVDOCS_REPO}"
         f"/{DEVDOCS_BRANCH}/{path}"
@@ -326,6 +349,7 @@ def sync_devdocs() -> dict:
     for item in tree:
         path = item["path"]
 
+        # Фильтр по префиксам (если задан)
         if DEVDOCS_INCLUDE_PREFIXES:
             if not any(path.startswith(p) for p in DEVDOCS_INCLUDE_PREFIXES):
                 stats["skipped"] += 1
@@ -334,6 +358,12 @@ def sync_devdocs() -> dict:
         md, source_ts = fetch_devdocs_file(path)
         if not md:
             stats["error"] += 1
+            continue
+
+        # --- Пропуск README и коротких оглавлений ---
+        if is_index_or_readme(path, md):
+            log.info(f"⏭ Пропуск (README/оглавление): {path}")
+            stats["skipped"] += 1
             continue
 
         article_id = "devdocs-" + slugify_path(path)
