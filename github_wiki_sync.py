@@ -65,33 +65,30 @@ def create_or_update(page: dict):
 
     existing = find_article_by_id(page["id"])
 
+    payload = {
+        "title": new_title,
+        "body": new_body,
+        "owner_id": INTERCOM_OWNER_ID,
+        "author_id": INTERCOM_AUTHOR_ID,
+        "ai_chatbot_availability": True,   # ← Service / Fin
+        # "ai_copilot_availability": True, # ← если нужно и для Copilot
+    }
+
     if existing:
-        payload = {
-            "title": new_title,
-            "body": new_body,
-            "owner_id": INTERCOM_OWNER_ID,
-            "author_id": INTERCOM_AUTHOR_ID,
-            "folder_id": existing.get("parent_id") or existing.get("folder_id") or TARGET_FOLDER_ID,
-        }
+        payload["folder_id"] = existing.get("parent_id") or existing.get("folder_id") or TARGET_FOLDER_ID
         r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing['id']}", json=payload, timeout=30)
         if r.status_code in (200, 201):
-            logging.info(f"✅ Обновлено: {page['title']}")
+            logging.info(f"✅ Обновлено (+ AI): {page['title']}")
             return "updated"
-        logging.error(f"❌ Ошибка обновления: {r.status_code} {r.text[:200]}")
+        logging.error(f"❌ Ошибка обновления: {r.status_code} {r.text[:300]}")
         return "error"
     else:
-        payload = {
-            "title": new_title,
-            "body": new_body,
-            "owner_id": INTERCOM_OWNER_ID,
-            "author_id": INTERCOM_AUTHOR_ID,
-            "folder_id": TARGET_FOLDER_ID,
-        }
+        payload["folder_id"] = TARGET_FOLDER_ID
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
         if r.status_code in (200, 201):
-            logging.info(f"✅ Создано: {page['title']}")
+            logging.info(f"✅ Создано (+ AI): {page['title']}")
             return "created"
-        logging.error(f"❌ Ошибка создания: {r.status_code} {r.text[:200]}")
+        logging.error(f"❌ Ошибка создания: {r.status_code} {r.text[:300]}")
         return "error"
 
 def main():
