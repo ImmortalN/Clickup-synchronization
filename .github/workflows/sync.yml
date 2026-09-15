@@ -13,17 +13,14 @@ on:
           - delete_guides
           - migrate_snippet
           - github_wiki
-
       clickup_task_id:
         description: 'ID задач ClickUp (один или несколько через запятую)'
         required: false
         default: ''
-
       folder_id:
         description: 'ID папки (для sync_bot.py)'
         required: false
         default: ''
-
       article_ids:
         description: 'ID статей через запятую (для sync_bot.py)'
         required: false
@@ -90,6 +87,18 @@ jobs:
         run: |
           python migrate_snippet_to_guide.py 2>&1 | tee sync.log
 
+      # ==============================
+      # GITHUB WIKI
+      # ==============================
+      - name: Run GitHub Wiki sync
+        if: github.event.inputs.script == 'github_wiki'
+        env:
+          INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
+          INTERCOM_OWNER_ID: ${{ secrets.INTERCOM_OWNER_ID }}
+          INTERCOM_AUTHOR_ID: ${{ secrets.INTERCOM_AUTHOR_ID }}
+        run: |
+          python github_wiki_sync.py 2>&1 | tee sync.log
+
       # Определяем: пропуск из-за нечётной недели (письмо не нужно)
       - name: Detect week skip
         id: week_skip
@@ -103,7 +112,7 @@ jobs:
           fi
 
       # ==============================
-      # SEND EMAIL — только автозапуск, и только если синк реально шёл
+      # SEND EMAIL — только автозапуск
       # ==============================
       - name: Send mail
         if: >-
@@ -122,6 +131,5 @@ jobs:
           body: |
             Автоматическая синхронизация завершена.
             Статус: ${{ job.status }}
-
             Логи во вложении.
           attachments: sync.log
