@@ -649,7 +649,8 @@ def sync_single_article(art, is_force=True):
             "body": new_body[:100000],
             "owner_id": INTERCOM_OWNER_ID,
             "author_id": INTERCOM_AUTHOR_ID,
-            "folder_id": current_folder
+            "folder_id": current_folder,
+            "ai_chatbot_availability": True,   # ← Service / Fin
         }
         try:
             r = ic.put(f"{INTERCOM_BASE}/internal_articles/{article_id}", json=payload, timeout=30)
@@ -727,6 +728,7 @@ def create_or_update_by_clickup_id(
             "owner_id": INTERCOM_OWNER_ID,
             "author_id": INTERCOM_AUTHOR_ID,
             "folder_id": folder_id,
+            "ai_chatbot_availability": True,   # ← Service / Fin
         }
         r = ic.put(f"{INTERCOM_BASE}/internal_articles/{existing_art['id']}", json=payload, timeout=30)
         if r.status_code in (200, 201):
@@ -749,6 +751,7 @@ def create_or_update_by_clickup_id(
         "owner_id": INTERCOM_OWNER_ID,
         "author_id": INTERCOM_AUTHOR_ID,
         "folder_id": folder_id,
+        "ai_chatbot_availability": True,   # ← Service / Fin
     }
     r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
     if r.status_code in (200, 201):
