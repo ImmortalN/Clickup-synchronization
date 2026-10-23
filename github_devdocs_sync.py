@@ -410,7 +410,8 @@ def list_user_gists(username: str, max_pages: int = 10) -> list[dict]:
 def gist_to_html(gist: dict) -> str:
     """
     Собирает HTML-тело гайда из гиста.
-    Код кладём в <pre><code> — так Intercom сохраняет переносы строк.
+    Переносы строк → <br>, табы → 4 пробела.
+    Так Intercom не схлопывает код.
     """
     parts = []
     desc = (gist.get("description") or "").strip()
@@ -429,17 +430,21 @@ def gist_to_html(gist: dict) -> str:
     files = gist.get("files") or {}
     for fname, fobj in files.items():
         content = fobj.get("content") or ""
-        # Нормализуем переносы (gist иногда отдаёт \r\n)
+        # Нормализуем переносы и табы
         content = content.replace("\r\n", "\n").replace("\r", "\n")
+        content = content.replace("\t", "    ")
+        content = content.rstrip("\n")
         lang = _lang_to_fence(fobj.get("language"))
         cls = f' class="language-{html.escape(lang)}"' if lang else ""
         safe_name = html.escape(fname)
-        safe_code = html.escape(content.rstrip("\n"))
+        # escape + каждый \n → <br>\n (Intercom сохраняет <br>)
+        safe_code = html.escape(content).replace("\n", "<br>\n")
         parts.append(f"<h3><code>{safe_name}</code></h3>")
-        # white-space:pre сохраняет все переносы и отступы
         parts.append(
-            f'<pre style="white-space:pre; overflow-x:auto; '
-            f'background:#f6f8fa; padding:12px; border-radius:6px;">'
+            '<pre style="white-space:pre-wrap; overflow-x:auto; '
+            'background:#f6f8fa; padding:12px; border-radius:6px; '
+            'font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; '
+            'font-size:13px; line-height:1.45;">'
             f"<code{cls}>{safe_code}</code></pre>"
         )
 
