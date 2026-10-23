@@ -64,7 +64,7 @@ DEVDOCS_INCLUDE_PREFIXES = []
 # --- Gists Crocoblock ---
 GISTS_USERNAME = "Crocoblock"
 # ТЕСТ: True = только один гист; False = все публичные гисты пользователя
-GISTS_TEST_MODE = False
+GISTS_TEST_MODE = True
 # ID гиста для теста (https://gist.github.com/Crocoblock/5f588a0d8bbb5ebe73633cfe5eedd5df)
 GISTS_TEST_ID = "5f588a0d8bbb5ebe73633cfe5eedd5df"
 
@@ -199,25 +199,68 @@ def human_title_from_path(path: str) -> str:
     return " · ".join(clean) if clean else path
 
 
-def find_article_by_id(article_id: str):
+# Кэш: article_id (то, что в [brackets] в title) → объект статьи Intercom
+_articles_index: dict[str, dict] | None = None
+
+
+def load_articles_index(force: bool = False) -> dict[str, dict]:
+    """
+    Один раз загружает ВСЕ internal articles и строит словарь по [id] в title.
+    Без этого find_article_by_id на каждый гист листает весь каталог заново → часы.
+    """
+    global _articles_index
+    if _articles_index is not None and not force:
+        return _articles_index
+
+    index: dict[str, dict] = {}
     page = 1
-    while True:
-        r = ic.get(
-            f"{INTERCOM_BASE}/internal_articles",
-            params={"page": page, "per_page": 50},
-            timeout=30,
-        )
+    total_pages = 1
+    log.info("📥 Загрузка индекса Intercom internal articles…")
+
+    while page <= total_pages:
+        try:
+            r = ic.get(
+                f"{INTERCOM_BASE}/internal_articles",
+                params={"page": page, "per_page": 50},
+                timeout=30,
+            )
+        except Exception as e:
+            log.error(f"index page {page}: {e}")
+            break
+
         if r.status_code != 200:
+            log.error(f"index page {page}: HTTP {r.status_code}")
             break
+
         data = r.json()
+        total_pages = data.get("pages", {}).get("total_pages", page) or page
+
         for art in data.get("data", []):
-            if f"[{article_id}]" in art.get("title", ""):
-                return art
-        if page >= data.get("pages", {}).get("total_pages", 1):
-            break
+            title = art.get("title") or ""
+            # все [id] в title (обычно один)
+            for m in re.finditer(r"\[([^\]]+)\]", title):
+                index[m.group(1)] = art
+
+        if page % 10 == 0 or page == total_pages:
+            log.info(f"  …страница {page}/{total_pages}, в индексе: {len(index)}")
         page += 1
-        time.sleep(0.12)
-    return None
+        time.sleep(0.05)
+
+    _articles_index = index
+    log.info(f"✅ Индекс готов: {len(index)} статей")
+    return index
+
+
+def find_article_by_id(article_id: str):
+    """O(1) поиск по заранее загруженному индексу."""
+    idx = load_articles_index()
+    return idx.get(article_id)
+
+
+def index_put(article_id: str, art: dict):
+    """Обновить индекс после create/update (чтобы не перечитывать всё)."""
+    if _articles_index is not None and art:
+        _articles_index[article_id] = art
 
 
 def create_or_update(
@@ -275,6 +318,10 @@ def create_or_update(
         )
         if r.status_code in (200, 201):
             log.info(f"✅ Обновлено: {title}")
+            try:
+                index_put(article_id, r.json())
+            except Exception:
+                pass
             return "updated"
         log.error(f"❌ Update error ({r.status_code}): {r.text[:250]}")
         return "error"
@@ -283,6 +330,10 @@ def create_or_update(
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
         if r.status_code in (200, 201):
             log.info(f"✅ Создано: {title}")
+            try:
+                index_put(article_id, r.json())
+            except Exception:
+                pass
             return "created"
         log.error(f"❌ Create error ({r.status_code}): {r.text[:250]}")
         return "error"
@@ -382,7 +433,7 @@ def fetch_gist(gist_id: str) -> dict | None:
         return None
 
 
-def list_user_gists(username: str, max_pages: int = 10) -> list[dict]:
+def list_user_gists(username: str, max_pages: int = 20) -> list[dict]:
     """Список публичных гистов пользователя (id, description, updated_at)."""
     gists = []
     page = 1
@@ -459,37 +510,53 @@ def sync_gists() -> dict:
 
     stats = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
 
+    # Индекс Intercom один раз (а не на каждый гист)
+    load_articles_index()
+
     if GISTS_TEST_MODE:
-        gist_ids = [GISTS_TEST_ID]
+        listed = [{"id": GISTS_TEST_ID, "description": "", "updated_at": ""}]
     else:
         listed = list_user_gists(GISTS_USERNAME)
         log.info("Найдено публичных гистов: %s", len(listed))
-        gist_ids = [g["id"] for g in listed]
 
-    for gist_id in gist_ids:
+    for i, item in enumerate(listed, 1):
+        gist_id = item["id"]
+        article_id = f"gist-{gist_id}"
+        list_ts = parse_iso_ts(item.get("updated_at"))
+        existing = find_article_by_id(article_id)
+
+        # Ранний skip по дате из списка (без скачивания тела гиста)
+        if existing and not GISTS_TEST_MODE:
+            intercom_ts = parse_intercom_ts(existing.get("updated_at"))
+            if list_ts and not is_source_newer(list_ts, intercom_ts):
+                log.info(
+                    f"⏭ [{i}/{len(listed)}] актуально: {article_id}"
+                )
+                stats["skipped"] += 1
+                continue
+
         gist = fetch_gist(gist_id)
         if not gist:
             stats["error"] += 1
             continue
 
-        source_ts = parse_iso_ts(gist.get("updated_at"))
-        title = (gist.get("description") or "").strip() or f"Gist {gist_id[:8]}"
-        # обрезаем слишком длинные title
+        source_ts = parse_iso_ts(gist.get("updated_at")) or list_ts
+        title = (gist.get("description") or item.get("description") or "").strip()
+        if not title:
+            title = f"Gist {gist_id[:8]}"
         if len(title) > 180:
             title = title[:177] + "…"
 
-        article_id = f"gist-{gist_id}"
         body_html = gist_to_html(gist)
-
         if not body_html or len(body_html) < 20:
             log.info("⏭ Пропуск (пустой контент): %s", gist_id)
             stats["skipped"] += 1
             continue
 
-        existing = find_article_by_id(article_id)
-        # В тестовом режиме всегда обновляем (иначе skip из-за даты Intercom > gist)
+        # В тестовом режиме всегда обновляем
         if GISTS_TEST_MODE and existing:
             source_ts = parse_intercom_ts(existing.get("updated_at")) + DATE_BUFFER_SECONDS + 10
+
         result = create_or_update(
             article_id,
             title,
@@ -500,10 +567,15 @@ def sync_gists() -> dict:
             body_html=body_html,
         )
         stats[result if result in stats else "error"] += 1
-        time.sleep(0.3)
+
+        if i % 25 == 0:
+            log.info(f"… прогресс {i}/{len(listed)} | {stats}")
+
+        time.sleep(0.12)  # было 0.3
 
     log.info(f"Gists готово: {stats}")
     return stats
+
 
 
 # ==============================
@@ -584,6 +656,9 @@ def main():
     log.info(f"Папка Intercom (wiki/devdocs): {TARGET_FOLDER_ID}")
     log.info(f"Папка Intercom (gists): {GISTS_FOLDER_ID}")
     log.info(f"GISTS_TEST_MODE = {GISTS_TEST_MODE}")
+
+    # Один раз на весь прогон (wiki + devdocs + gists)
+    load_articles_index(force=True)
 
     total = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
 
