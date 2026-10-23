@@ -551,14 +551,26 @@ def sync_devdocs() -> dict:
 
 
 def main():
+    import sys
+
+    # Режим: без аргументов / "all" → wiki + devdocs + gists
+    #         "gists" → только гисты (для теста)
+    mode = (sys.argv[1] if len(sys.argv) > 1 else "all").strip().lower()
+
     log.info("=== СТАРТ GitHub Dev Docs + Gists Sync ===")
+    log.info(f"Режим: {mode}")
     log.info(f"Папка Intercom (wiki/devdocs): {TARGET_FOLDER_ID}")
     log.info(f"Папка Intercom (gists): {GISTS_FOLDER_ID}")
     log.info(f"GISTS_TEST_MODE = {GISTS_TEST_MODE}")
 
     total = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
 
-    for part in (sync_wiki, sync_devdocs, sync_gists):
+    if mode == "gists":
+        parts = (sync_gists,)
+    else:
+        parts = (sync_wiki, sync_devdocs, sync_gists)
+
+    for part in parts:
         stats = part()
         for k in total:
             total[k] += stats.get(k, 0)
