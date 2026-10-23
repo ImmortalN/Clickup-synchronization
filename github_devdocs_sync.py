@@ -64,7 +64,7 @@ DEVDOCS_INCLUDE_PREFIXES = []
 # --- Gists Crocoblock ---
 GISTS_USERNAME = "Crocoblock"
 # ТЕСТ: True = только один гист; False = все публичные гисты пользователя
-GISTS_TEST_MODE = True
+GISTS_TEST_MODE = False
 # ID гиста для теста (https://gist.github.com/Crocoblock/5f588a0d8bbb5ebe73633cfe5eedd5df)
 GISTS_TEST_ID = "5f588a0d8bbb5ebe73633cfe5eedd5df"
 
