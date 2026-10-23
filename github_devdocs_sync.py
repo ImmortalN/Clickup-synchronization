@@ -64,7 +64,7 @@ DEVDOCS_INCLUDE_PREFIXES = []
 # --- Gists Crocoblock ---
 GISTS_USERNAME = "Crocoblock"
 # ТЕСТ: True = только один гист; False = все публичные гисты пользователя
-GISTS_TEST_MODE = False
+GISTS_TEST_MODE = True
 # ID гиста для теста (https://gist.github.com/Crocoblock/5f588a0d8bbb5ebe73633cfe5eedd5df)
 GISTS_TEST_ID = "5f588a0d8bbb5ebe73633cfe5eedd5df"
 
@@ -84,6 +84,17 @@ ic.headers.update({
     "Intercom-Version": INTERCOM_VERSION,
     "Content-Type": "application/json",
 })
+
+# GitHub API: с токеном лимит ~1000–5000/час, без — 60/час (и secondary 403)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or ""
+gh = requests.Session()
+gh.headers.update({
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "Clickup-synchronization-gists-sync",
+    "X-GitHub-Api-Version": "2022-11-28",
+})
+if GITHUB_TOKEN:
+    gh.headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
 # ==============================
 # ДАТЫ
@@ -419,30 +430,109 @@ def _lang_to_fence(lang: str | None) -> str:
     return mapping.get(lang, lang.lower() if lang else "")
 
 
+def _github_get(url: str, params: dict | None = None, timeout: int = 30) -> requests.Response:
+    """GET к GitHub с retry на 403/429 (rate limit)."""
+    last = None
+    for attempt in range(6):
+        r = gh.get(url, params=params, timeout=timeout)
+        last = r
+        if r.status_code not in (403, 429):
+            return r
+
+        # rate limit / abuse
+        remaining = r.headers.get("X-RateLimit-Remaining")
+        reset = r.headers.get("X-RateLimit-Reset")
+        retry_after = r.headers.get("Retry-After")
+        body_preview = (r.text or "")[:200]
+
+        wait = 60
+        if retry_after and str(retry_after).isdigit():
+            wait = int(retry_after) + 1
+        elif remaining == "0" and reset and str(reset).isdigit():
+            wait = max(5, int(reset) - int(time.time()) + 2)
+        else:
+            wait = min(120, 15 * (attempt + 1))  # secondary limit
+
+        log.warning(
+            f"GitHub {r.status_code} (attempt {attempt + 1}/6), ждём {wait}s | "
+            f"remaining={remaining} | {body_preview}"
+        )
+        time.sleep(wait)
+
+    return last
+
+
 def fetch_gist(gist_id: str) -> dict | None:
-    """Возвращает полный объект гиста или None."""
+    """Полный объект гиста. При 403 API — fallback через raw_url из list/partial."""
     url = f"https://api.github.com/gists/{gist_id}"
     try:
-        r = requests.get(url, timeout=20)
-        if r.status_code != 200:
-            log.error(f"Gist {gist_id}: HTTP {r.status_code}")
-            return None
-        return r.json()
+        r = _github_get(url, timeout=20)
+        if r.status_code == 200:
+            return r.json()
+
+        log.error(f"Gist {gist_id}: HTTP {r.status_code} | {(r.text or '')[:180]}")
+        return None
     except Exception as e:
         log.error(f"Gist {gist_id}: {e}")
         return None
 
 
+def fetch_gist_via_raw(gist_meta: dict) -> dict | None:
+    """
+    Fallback: собрать «гист» из list-метаданных + raw.githubusercontent.com.
+    list endpoint уже даёт files[].raw_url, description, updated_at.
+    """
+    files_meta = gist_meta.get("files") or {}
+    if not files_meta:
+        return None
+
+    files = {}
+    for fname, fobj in files_meta.items():
+        raw_url = (fobj or {}).get("raw_url")
+        content = (fobj or {}).get("content")
+        truncated = (fobj or {}).get("truncated", False)
+
+        if content and not truncated:
+            pass  # уже есть
+        elif raw_url:
+            try:
+                rr = requests.get(raw_url, timeout=20, headers={"User-Agent": "Clickup-synchronization-gists-sync"})
+                if rr.status_code != 200:
+                    log.warning(f"raw {fname}: HTTP {rr.status_code}")
+                    return None
+                content = rr.text
+            except Exception as e:
+                log.warning(f"raw {fname}: {e}")
+                return None
+        else:
+            return None
+
+        files[fname] = {
+            "filename": fname,
+            "language": (fobj or {}).get("language"),
+            "content": content,
+            "raw_url": raw_url,
+        }
+
+    return {
+        "id": gist_meta.get("id"),
+        "description": gist_meta.get("description") or "",
+        "html_url": gist_meta.get("html_url") or "",
+        "updated_at": gist_meta.get("updated_at") or "",
+        "files": files,
+    }
+
+
 def list_user_gists(username: str, max_pages: int = 20) -> list[dict]:
-    """Список публичных гистов пользователя (id, description, updated_at)."""
+    """Список публичных гистов пользователя (id, description, updated_at, files meta)."""
     gists = []
     page = 1
     while page <= max_pages:
         url = f"https://api.github.com/users/{username}/gists"
         try:
-            r = requests.get(url, params={"per_page": 100, "page": page}, timeout=30)
+            r = _github_get(url, params={"per_page": 100, "page": page}, timeout=30)
             if r.status_code != 200:
-                log.error(f"List gists page {page}: {r.status_code}")
+                log.error(f"List gists page {page}: {r.status_code} | {(r.text or '')[:180]}")
                 break
             batch = r.json()
             if not batch:
@@ -451,7 +541,7 @@ def list_user_gists(username: str, max_pages: int = 20) -> list[dict]:
             if len(batch) < 100:
                 break
             page += 1
-            time.sleep(0.2)
+            time.sleep(0.15)
         except Exception as e:
             log.error(f"list_user_gists: {e}")
             break
@@ -537,8 +627,13 @@ def sync_gists() -> dict:
 
         gist = fetch_gist(gist_id)
         if not gist:
-            stats["error"] += 1
-            continue
+            # Fallback: raw_url (часто спасает при API 403)
+            gist = fetch_gist_via_raw(item)
+            if gist:
+                log.info(f"↩ Gist {gist_id}: загружен через raw_url")
+            else:
+                stats["error"] += 1
+                continue
 
         source_ts = parse_iso_ts(gist.get("updated_at")) or list_ts
         title = (gist.get("description") or item.get("description") or "").strip()
@@ -656,6 +751,7 @@ def main():
     log.info(f"Папка Intercom (wiki/devdocs): {TARGET_FOLDER_ID}")
     log.info(f"Папка Intercom (gists): {GISTS_FOLDER_ID}")
     log.info(f"GISTS_TEST_MODE = {GISTS_TEST_MODE}")
+    log.info(f"GitHub auth: {'token' if GITHUB_TOKEN else 'anonymous (60 req/hour — риск 403)'}")
 
     # Один раз на весь прогон (wiki + devdocs + gists)
     load_articles_index(force=True)
