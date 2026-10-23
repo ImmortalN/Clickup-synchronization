@@ -223,12 +223,17 @@ def find_article_by_id(article_id: str):
 def create_or_update(
     article_id: str,
     title: str,
-    body_md: str,
+    body_md: str = "",
     source_ts: float = 0.0,
     existing: dict | None = None,
     folder_id: int | None = None,
+    body_html: str | None = None,
 ) -> str:
-    """create / update / skipped / error"""
+    """create / update / skipped / error.
+
+    Передай либо body_md (будет прогнан через markdown),
+    либо готовый body_html (для гистов — чтобы сохранить переносы в коде).
+    """
     target_folder = folder_id if folder_id is not None else TARGET_FOLDER_ID
 
     if existing is None:
@@ -244,7 +249,8 @@ def create_or_update(
             )
             return "skipped"
 
-    body_html = markdown(body_md, extensions=["fenced_code", "nl2br", "tables"])
+    if body_html is None:
+        body_html = markdown(body_md, extensions=["fenced_code", "nl2br", "tables"])
     new_title = f"{title} [{article_id}]"[:255]
     new_body = f"<h1>{html.escape(title)}</h1>{body_html}"[:100000]
 
@@ -401,37 +407,44 @@ def list_user_gists(username: str, max_pages: int = 10) -> list[dict]:
     return gists
 
 
-def gist_to_markdown(gist: dict) -> str:
+def gist_to_html(gist: dict) -> str:
     """
-    Собирает markdown-тело гайда из гиста:
-    - описание
-    - ссылка на gist
-    - каждый файл как fenced code block
+    Собирает HTML-тело гайда из гиста.
+    Код кладём в <pre><code> — так Intercom сохраняет переносы строк.
     """
     parts = []
     desc = (gist.get("description") or "").strip()
     html_url = gist.get("html_url") or ""
 
     if desc:
-        parts.append(desc)
-        parts.append("")
+        parts.append(f"<p>{html.escape(desc)}</p>")
 
     if html_url:
-        parts.append(f"**Source:** [{html_url}]({html_url})")
-        parts.append("")
+        safe_url = html.escape(html_url, quote=True)
+        parts.append(
+            f'<p><strong>Source:</strong> '
+            f'<a href="{safe_url}">{html.escape(html_url)}</a></p>'
+        )
 
     files = gist.get("files") or {}
     for fname, fobj in files.items():
         content = fobj.get("content") or ""
+        # Нормализуем переносы (gist иногда отдаёт \r\n)
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
         lang = _lang_to_fence(fobj.get("language"))
-        parts.append(f"### `{fname}`")
-        parts.append("")
-        parts.append(f"```{lang}")
-        parts.append(content.rstrip())
-        parts.append("```")
-        parts.append("")
+        cls = f' class="language-{html.escape(lang)}"' if lang else ""
+        safe_name = html.escape(fname)
+        safe_code = html.escape(content.rstrip("\n"))
+        parts.append(f"<h3><code>{safe_name}</code></h3>")
+        # white-space:pre сохраняет все переносы и отступы
+        parts.append(
+            f'<pre style="white-space:pre; overflow-x:auto; '
+            f'background:#f6f8fa; padding:12px; border-radius:6px;">'
+            f"<code{cls}>{safe_code}</code></pre>"
+        )
 
-    return "\n".join(parts).strip()
+    return "\n".join(parts)
+
 
 
 def sync_gists() -> dict:
@@ -461,21 +474,25 @@ def sync_gists() -> dict:
             title = title[:177] + "…"
 
         article_id = f"gist-{gist_id}"
-        body_md = gist_to_markdown(gist)
+        body_html = gist_to_html(gist)
 
-        if not body_md or len(body_md) < 20:
+        if not body_html or len(body_html) < 20:
             log.info("⏭ Пропуск (пустой контент): %s", gist_id)
             stats["skipped"] += 1
             continue
 
         existing = find_article_by_id(article_id)
+        # В тестовом режиме всегда обновляем (иначе skip из-за даты Intercom > gist)
+        if GISTS_TEST_MODE and existing:
+            source_ts = parse_intercom_ts(existing.get("updated_at")) + DATE_BUFFER_SECONDS + 10
         result = create_or_update(
             article_id,
             title,
-            body_md,
+            body_md="",
             source_ts=source_ts,
             existing=existing,
             folder_id=GISTS_FOLDER_ID,
+            body_html=body_html,
         )
         stats[result if result in stats else "error"] += 1
         time.sleep(0.3)
