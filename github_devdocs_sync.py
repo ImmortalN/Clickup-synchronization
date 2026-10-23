@@ -1,15 +1,19 @@
-#!/usr/bin/env python3
 """
-GitHub Dev Docs → Intercom Internal Guides (единый скрипт)
+GitHub Dev Docs + Gists → Intercom Internal Guides (единый скрипт)
 
 Источники:
-  1. Wiki JetFormBuilder (фиксированный список страниц)
-  2. Все полезные .md из Crocoblock/developer-documentation
+  1. Wiki JetFormBuilder (фиксированный список страниц) → папка TARGET_FOLDER_ID
+  2. Все полезные .md из Crocoblock/developer-documentation → папка TARGET_FOLDER_ID
+  3. Публичные Gists Crocoblock → папка GISTS_FOLDER_ID (5990385)
 
 Оптимизации:
-  - сравнение Last-Modified источника с updated_at Intercom → skip если актуально
+  - сравнение Last-Modified / updated_at источника с updated_at Intercom → skip если актуально
   - пропуск README и коротких оглавлений (только ссылки)
   - ai_chatbot_availability = True (тоггл Service)
+
+ТЕСТОВЫЙ РЕЖИМ ДЛЯ GISTS:
+  GISTS_TEST_MODE = True  → синхронизируется только один гист (GISTS_TEST_ID)
+  Когда всё ок — поставь GISTS_TEST_MODE = False
 """
 
 import os
@@ -35,7 +39,8 @@ INTERCOM_VERSION = "Unstable"
 INTERCOM_OWNER_ID = int(os.getenv("INTERCOM_OWNER_ID", 0))
 INTERCOM_AUTHOR_ID = int(os.getenv("INTERCOM_AUTHOR_ID", 0))
 
-TARGET_FOLDER_ID = 5654984
+TARGET_FOLDER_ID = 5654984          # wiki + developer-documentation
+GISTS_FOLDER_ID = 5990385           # гисты Crocoblock
 
 # --- Wiki JetFormBuilder ---
 WIKI_PAGES = [
@@ -55,6 +60,13 @@ DEVDOCS_BRANCH = "main"
 
 # [] = все файлы; можно ограничить, например: ["03-jet-form-builder", "01-jet-engine"]
 DEVDOCS_INCLUDE_PREFIXES = []
+
+# --- Gists Crocoblock ---
+GISTS_USERNAME = "Crocoblock"
+# ТЕСТ: True = только один гист; False = все публичные гисты пользователя
+GISTS_TEST_MODE = True
+# ID гиста для теста (https://gist.github.com/Crocoblock/5f588a0d8bbb5ebe73633cfe5eedd5df)
+GISTS_TEST_ID = "5f588a0d8bbb5ebe73633cfe5eedd5df"
 
 # Буфер в секундах: источник должен быть новее минимум на столько
 DATE_BUFFER_SECONDS = 30
@@ -103,6 +115,16 @@ def parse_last_modified(header_value: str | None) -> float:
         dt = parsedate_to_datetime(header_value)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
+def parse_iso_ts(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return dt.timestamp()
     except Exception:
         return 0.0
@@ -204,8 +226,11 @@ def create_or_update(
     body_md: str,
     source_ts: float = 0.0,
     existing: dict | None = None,
+    folder_id: int | None = None,
 ) -> str:
     """create / update / skipped / error"""
+    target_folder = folder_id if folder_id is not None else TARGET_FOLDER_ID
+
     if existing is None:
         existing = find_article_by_id(article_id)
 
@@ -235,7 +260,7 @@ def create_or_update(
         payload["folder_id"] = (
             existing.get("parent_id")
             or existing.get("folder_id")
-            or TARGET_FOLDER_ID
+            or target_folder
         )
         r = ic.put(
             f"{INTERCOM_BASE}/internal_articles/{existing['id']}",
@@ -248,7 +273,7 @@ def create_or_update(
         log.error(f"❌ Update error ({r.status_code}): {r.text[:250]}")
         return "error"
     else:
-        payload["folder_id"] = TARGET_FOLDER_ID
+        payload["folder_id"] = target_folder
         r = ic.post(f"{INTERCOM_BASE}/internal_articles", json=payload, timeout=30)
         if r.status_code in (200, 201):
             log.info(f"✅ Создано: {title}")
@@ -312,6 +337,151 @@ def fetch_devdocs_file(path: str) -> tuple[str | None, float]:
     except Exception as e:
         log.warning(f"Ошибка {path}: {e}")
         return None, 0.0
+
+
+# ==============================
+# GISTS
+# ==============================
+
+def _lang_to_fence(lang: str | None) -> str:
+    if not lang:
+        return ""
+    mapping = {
+        "PHP": "php",
+        "JavaScript": "javascript",
+        "TypeScript": "typescript",
+        "CSS": "css",
+        "HTML": "html",
+        "Markdown": "markdown",
+        "Python": "python",
+        "Shell": "bash",
+        "JSON": "json",
+        "YAML": "yaml",
+        "Text": "",
+    }
+    return mapping.get(lang, lang.lower() if lang else "")
+
+
+def fetch_gist(gist_id: str) -> dict | None:
+    """Возвращает полный объект гиста или None."""
+    url = f"https://api.github.com/gists/{gist_id}"
+    try:
+        r = requests.get(url, timeout=20)
+        if r.status_code != 200:
+            log.error(f"Gist {gist_id}: HTTP {r.status_code}")
+            return None
+        return r.json()
+    except Exception as e:
+        log.error(f"Gist {gist_id}: {e}")
+        return None
+
+
+def list_user_gists(username: str, max_pages: int = 10) -> list[dict]:
+    """Список публичных гистов пользователя (id, description, updated_at)."""
+    gists = []
+    page = 1
+    while page <= max_pages:
+        url = f"https://api.github.com/users/{username}/gists"
+        try:
+            r = requests.get(url, params={"per_page": 100, "page": page}, timeout=30)
+            if r.status_code != 200:
+                log.error(f"List gists page {page}: {r.status_code}")
+                break
+            batch = r.json()
+            if not batch:
+                break
+            gists.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+            time.sleep(0.2)
+        except Exception as e:
+            log.error(f"list_user_gists: {e}")
+            break
+    return gists
+
+
+def gist_to_markdown(gist: dict) -> str:
+    """
+    Собирает markdown-тело гайда из гиста:
+    - описание
+    - ссылка на gist
+    - каждый файл как fenced code block
+    """
+    parts = []
+    desc = (gist.get("description") or "").strip()
+    html_url = gist.get("html_url") or ""
+
+    if desc:
+        parts.append(desc)
+        parts.append("")
+
+    if html_url:
+        parts.append(f"**Source:** [{html_url}]({html_url})")
+        parts.append("")
+
+    files = gist.get("files") or {}
+    for fname, fobj in files.items():
+        content = fobj.get("content") or ""
+        lang = _lang_to_fence(fobj.get("language"))
+        parts.append(f"### `{fname}`")
+        parts.append("")
+        parts.append(f"```{lang}")
+        parts.append(content.rstrip())
+        parts.append("```")
+        parts.append("")
+
+    return "\n".join(parts).strip()
+
+
+def sync_gists() -> dict:
+    log.info("=== СИНХРОНИЗАЦИЯ Gists Crocoblock → folder %s ===", GISTS_FOLDER_ID)
+    if GISTS_TEST_MODE:
+        log.info("⚠ ТЕСТОВЫЙ РЕЖИМ: только гист %s", GISTS_TEST_ID)
+
+    stats = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
+
+    if GISTS_TEST_MODE:
+        gist_ids = [GISTS_TEST_ID]
+    else:
+        listed = list_user_gists(GISTS_USERNAME)
+        log.info("Найдено публичных гистов: %s", len(listed))
+        gist_ids = [g["id"] for g in listed]
+
+    for gist_id in gist_ids:
+        gist = fetch_gist(gist_id)
+        if not gist:
+            stats["error"] += 1
+            continue
+
+        source_ts = parse_iso_ts(gist.get("updated_at"))
+        title = (gist.get("description") or "").strip() or f"Gist {gist_id[:8]}"
+        # обрезаем слишком длинные title
+        if len(title) > 180:
+            title = title[:177] + "…"
+
+        article_id = f"gist-{gist_id}"
+        body_md = gist_to_markdown(gist)
+
+        if not body_md or len(body_md) < 20:
+            log.info("⏭ Пропуск (пустой контент): %s", gist_id)
+            stats["skipped"] += 1
+            continue
+
+        existing = find_article_by_id(article_id)
+        result = create_or_update(
+            article_id,
+            title,
+            body_md,
+            source_ts=source_ts,
+            existing=existing,
+            folder_id=GISTS_FOLDER_ID,
+        )
+        stats[result if result in stats else "error"] += 1
+        time.sleep(0.3)
+
+    log.info(f"Gists готово: {stats}")
+    return stats
 
 
 # ==============================
@@ -381,12 +551,14 @@ def sync_devdocs() -> dict:
 
 
 def main():
-    log.info("=== СТАРТ GitHub Dev Docs Sync ===")
-    log.info(f"Папка Intercom: {TARGET_FOLDER_ID}")
+    log.info("=== СТАРТ GitHub Dev Docs + Gists Sync ===")
+    log.info(f"Папка Intercom (wiki/devdocs): {TARGET_FOLDER_ID}")
+    log.info(f"Папка Intercom (gists): {GISTS_FOLDER_ID}")
+    log.info(f"GISTS_TEST_MODE = {GISTS_TEST_MODE}")
 
     total = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
 
-    for part in (sync_wiki, sync_devdocs):
+    for part in (sync_wiki, sync_devdocs, sync_gists):
         stats = part()
         for k in total:
             total[k] += stats.get(k, 0)
